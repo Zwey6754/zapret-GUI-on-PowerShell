@@ -37,7 +37,7 @@ if "%1"=="admin" (
     call :check_command powershell
 
     echo Requesting admin rights...
-    powershell -NoProfile -Command "Start-Process 'cmd.exe' -ArgumentList '/c \"\"%~f0\" admin\"' -Verb RunAs"
+    powershell -Command "Start-Process 'cmd.exe' -ArgumentList '/c \"\"%~f0\" admin\"' -Verb RunAs"
     exit
 )
 
@@ -203,7 +203,7 @@ set "LISTS_PATH=%~dp0lists\"
 :: Searching for .bat files in current folder, except files that start with "service"
 echo Pick one of the options:
 set "count=0"
-for /f "delims=" %%F in ('powershell -NoProfile -Command "Get-ChildItem -LiteralPath '.' -Filter '*.bat' | Where-Object { $_.Name -notlike 'service*' } | Sort-Object { [Regex]::Replace($_.Name, '(\d+)', { $args[0].Value.PadLeft(8, '0') }) } | ForEach-Object { $_.Name }"') do (
+for /f "delims=" %%F in ('powershell -Command "Get-ChildItem -Filter '*.bat' | Where-Object { $_.Name -notlike 'service*' } | Sort-Object { [Regex]::Replace($_.Name, '\d+', { $args[0].Value.PadLeft(8, '0') }) } | ForEach-Object { $_.Name }"') do (
     set /a count+=1
     echo !count!. %%F
     set "file!count!=%%F"
@@ -338,7 +338,7 @@ set "GITHUB_RELEASE_URL=https://github.com/Flowseal/zapret-discord-youtube/relea
 set "GITHUB_DOWNLOAD_URL=https://github.com/Flowseal/zapret-discord-youtube/releases/latest/download/zapret-discord-youtube-"
 
 :: Get the latest version from GitHub
-for /f "delims=" %%A in ('powershell -NoProfile -Command "(Invoke-WebRequest -Uri \"%GITHUB_VERSION_URL%\" -Headers @{\"Cache-Control\"=\"no-cache\"} -UseBasicParsing -TimeoutSec 5).Content.Trim()" 2^>nul') do set "GITHUB_VERSION=%%A"
+for /f "delims=" %%A in ('powershell -command "(Invoke-WebRequest -Uri \"%GITHUB_VERSION_URL%\" -Headers @{\"Cache-Control\"=\"no-cache\"} -UseBasicParsing -TimeoutSec 5).Content.Trim()" 2^>nul') do set "GITHUB_VERSION=%%A"
 
 :: Error handling
 if not defined GITHUB_VERSION (
@@ -513,7 +513,7 @@ echo:
 
 :: DNS
 set "dohfound=0"
-for /f "delims=" %%a in ('powershell -NoProfile -Command "Get-ChildItem -Recurse -Path 'HKLM:System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\' | Get-ItemProperty | Where-Object { $_.DohFlags -gt 0 } | Measure-Object | Select-Object -ExpandProperty Count"') do (
+for /f "delims=" %%a in ('powershell -Command "Get-ChildItem -Recurse -Path 'HKLM:System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\' | Get-ItemProperty | Where-Object { $_.DohFlags -gt 0 } | Measure-Object | Select-Object -ExpandProperty Count"') do (
     if %%a gtr 0 (
         set "dohfound=1"
     )
@@ -810,7 +810,7 @@ echo Updating ipset-all...
 if exist "%SystemRoot%\System32\curl.exe" (
     curl -L -o "%listFile%" "%url%"
 ) else (
-    powershell -NoProfile -Command ^
+    powershell -Command ^
         "$url = '%url%';" ^
         "$out = '%listFile%';" ^
         "$dir = Split-Path -Parent $out;" ^
@@ -840,7 +840,7 @@ echo Checking hosts file...
 if exist "%SystemRoot%\System32\curl.exe" (
     curl -L -s -o "%tempFile%" "%hostsUrl%"
 ) else (
-    powershell -NoProfile -Command ^
+    powershell -Command ^
         "$url = '%hostsUrl%';" ^
         "$out = '%tempFile%';" ^
         "$res = Invoke-WebRequest -Uri $url -TimeoutSec 10 -UseBasicParsing;" ^
@@ -917,15 +917,15 @@ goto menu
 :: Utility functions
 
 :PrintGreen
-powershell -NoProfile -Command "Write-Host \"%~1\" -ForegroundColor Green"
+powershell -Command "Write-Host \"%~1\" -ForegroundColor Green"
 exit /b
 
 :PrintRed
-powershell -NoProfile -Command "Write-Host \"%~1\" -ForegroundColor Red"
+powershell -Command "Write-Host \"%~1\" -ForegroundColor Red"
 exit /b
 
 :PrintYellow
-powershell -NoProfile -Command "Write-Host \"%~1\" -ForegroundColor Yellow"
+powershell -Command "Write-Host \"%~1\" -ForegroundColor Yellow"
 exit /b
 
 :check_command

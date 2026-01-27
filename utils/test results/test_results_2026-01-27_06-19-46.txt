@@ -1,0 +1,23 @@
+﻿
+Config: general (SIMPLE FAKE ALT2).bat (Type: standard)
+  UNKNOWN : HTTP:ERROR | Ping: Timeout
+  DiscordGateway : HTTP:ERROR TLS1.2:ERROR TLS1.3:ERROR | Ping: 46 ms
+  DiscordCDN : HTTP:ERROR TLS1.2:ERROR TLS1.3:ERROR | Ping: 45 ms
+  DiscordUpdates : HTTP:ERROR TLS1.2:ERROR TLS1.3:ERROR | Ping: 40 ms
+  YouTubeWeb : HTTP:ERROR TLS1.2:ERROR TLS1.3:ERROR | Ping: 56 ms
+  YouTubeShort : HTTP:ERROR TLS1.2:ERROR TLS1.3:ERROR | Ping: 57 ms
+  YouTubeImage : HTTP:ERROR TLS1.2:ERROR TLS1.3:ERROR | Ping: 50 ms
+  YouTubeVideoRedirect : HTTP:ERROR TLS1.2:ERROR TLS1.3:ERROR | Ping: 54 ms
+  GoogleMain : HTTP:OK    TLS1.2:OK    TLS1.3:OK    | Ping: 71 ms
+  GoogleGstatic : HTTP:OK    TLS1.2:OK    TLS1.3:OK    | Ping: 57 ms
+  CloudflareWeb : HTTP:OK    TLS1.2:OK    TLS1.3:OK    | Ping: 49 ms
+  CloudflareCDN : HTTP:OK    TLS1.2:OK    TLS1.3:OK    | Ping: 53 ms
+  CloudflareDNS1111 :  | Ping: 44 ms
+  CloudflareDNS1001 :  | Ping: 45 ms
+  GoogleDNS8888 :  | Ping: 56 ms
+  GoogleDNS8844 :  | Ping: 55 ms
+  Quad9DNS9999 :  | Ping: 53 ms
+
+=== ANALYTICS ===
+general (SIMPLE FAKE ALT2).bat : HTTP OK: 12, ERR: 22, UNSUP: 0, Ping OK: 16, Fail: 1
+Best strategy: general (SIMPLE FAKE ALT2).bat
