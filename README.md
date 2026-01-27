@@ -203,3 +203,6 @@ sc delete название_из_первого_шага
     list-exclude.txt для исключения доменов (например, если айпи сети указан в ipset-all.txt, но конкретный домен из этой сети не надо фильтровать)
     ipset-all.txt для IP и подсетей
     ipset-exclude.txt для исключения IP и подсетей
+
+
+Оригинал https://github.com/Flowseal/zapret-discord-youtube
