@@ -1,7 +1,6 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# Check admin rights
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin) {
@@ -9,14 +8,12 @@ if (-not $isAdmin) {
     exit
 }
 
-# Hide console window
 Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);'
 [Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0) | Out-Null
 
 $LOCAL_VERSION = "1.9.5"
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
-# Enhanced Color scheme with dark tones
 $colors = @{
     Primary = [System.Drawing.Color]::FromArgb(41, 128, 185)
     Success = [System.Drawing.Color]::FromArgb(39, 174, 96)
@@ -35,7 +32,6 @@ $colors = @{
     Slate = [System.Drawing.Color]::FromArgb(79, 90, 101)
 }
 
-# Helper Functions
 function Get-ServiceStatus {
     param([string]$ServiceName)
     try {
@@ -76,7 +72,6 @@ function Update-StatusBar {
     param([string]$Message, [string]$Type = "Info")
     $statusLabel.Text = "  $Message"
     
-    # update statusbar
     $statusIcon.Text = "●"
     
     switch ($Type) {
@@ -159,7 +154,6 @@ function Update-StatusDisplay {
     $updateStatus = Get-UpdateCheckStatus
     $btnAutoUpdate.Text = "Auto-Update [$updateStatus]"
     
-    # Update service buttons state
     if ($serviceInfo.Installed) {
         $btnStopService.Enabled = $serviceInfo.Running
         $btnStartService.Enabled = -not $serviceInfo.Running
@@ -212,7 +206,6 @@ function Start-ZapretService {
         sc.exe start zapret | Out-Null
         Start-Sleep -Milliseconds 500
         
-        # Verify service started
         Start-Sleep -Seconds 2
         $newStatus = Get-ServiceStatus "zapret"
         if ($newStatus -eq "Running") {
@@ -306,7 +299,6 @@ function Parse-BatFileNew {
     }
 }
 
-# НОВАЯ ФУНКЦИЯ: Проверка наличия winws.exe (ИСПРАВЛЕННЫЙ СИНТАКСИС)
 function Test-WinwsExe {
     param([string]$BinPath)
     
@@ -315,7 +307,6 @@ function Test-WinwsExe {
         return $winwsPath
     }
     
-    # Ищем в других возможных местах - ПРАВИЛЬНЫЙ СИНТАКСИС МАССИВА
     $possiblePaths = @(
         $winwsPath
         (Join-Path $ScriptPath "winws.exe")
@@ -332,7 +323,6 @@ function Test-WinwsExe {
     return $null
 }
 
-# Service Functions
 function Install-ZapretService {
     Update-StatusBar "Preparing to install service..." "Info"
     
@@ -344,7 +334,6 @@ function Install-ZapretService {
     }
     
     if ($batFiles.Count -eq 0) {
-        # Проверяем в родительской директории
         $parentPath = Split-Path $ScriptPath -Parent
         if (Test-Path (Join-Path $parentPath "*.bat")) {
             $batFiles = Get-ChildItem -Path $parentPath -Filter "*.bat" | 
@@ -367,7 +356,6 @@ function Install-ZapretService {
         return
     }
     
-    # Selection dialog
     $selectForm = New-Object System.Windows.Forms.Form
     $selectForm.Text = "Select Configuration File"
     $selectForm.Size = New-Object System.Drawing.Size(600, 450)
@@ -434,7 +422,6 @@ function Install-ZapretService {
     $gameStatus = Get-GameFilterStatus
     $gameFilter = $gameStatus.Filter
     
-    # Проверяем наличие winws.exe
     $winwsPath = Test-WinwsExe -BinPath $binPath
     if (-not $winwsPath) {
         [System.Windows.Forms.MessageBox]::Show(
@@ -450,7 +437,6 @@ function Install-ZapretService {
         return
     }
     
-    # Парсим BAT файл НОВЫМ методом
     Update-StatusBar "Parsing configuration file..." "Info"
     $cmdLine = Parse-BatFileNew -FilePath $selectedFile -BinPath $binPath -ListsPath $listsPath -GameFilter $gameFilter
     
@@ -466,10 +452,8 @@ function Install-ZapretService {
         return
     }
     
-    # Enable TCP timestamps
     netsh interface tcp set global timestamps=enabled | Out-Null
     
-    # Stop and remove existing service
     Update-StatusBar "Removing old service..." "Info"
     Stop-ZapretService -Silent $true | Out-Null
     Start-Sleep -Milliseconds 500
@@ -480,13 +464,10 @@ function Install-ZapretService {
         Start-Sleep -Milliseconds 500
     }
     
-    # Создаем службу через SC.EXE (как в service_new.bat)
     Update-StatusBar "Creating service via SC.EXE..." "Info"
     
-    # Формируем команду для службы
     $serviceBinPath = "`"$winwsPath`" $cmdLine"
     
-    # Используем команды как в service_new.bat
     $scCommand = "sc.exe create zapret binPath= `"$serviceBinPath`" DisplayName= `"zapret`" start= auto"
     Write-Host "SC Command: $scCommand"
     
@@ -494,11 +475,9 @@ function Install-ZapretService {
     Write-Host "SC Result: $result"
     
     if ($LASTEXITCODE -ne 0) {
-        # Пробуем альтернативный метод
         Update-StatusBar "Trying alternative method..." "Warning"
         
         try {
-            # Пробуем через New-Service
             $fullCommand = "`"$winwsPath`" $cmdLine"
             New-Service -Name "zapret" `
                        -BinaryPathName $fullCommand `
@@ -527,24 +506,19 @@ function Install-ZapretService {
         Update-StatusBar "Service created via SC.EXE" "Success"
     }
     
-    # Устанавливаем описание службы
     sc.exe description zapret "Zapret DPI bypass software" 2>&1 | Out-Null
     
-    # Сохраняем имя конфигурации в реестре
     $configName = [System.IO.Path]::GetFileNameWithoutExtension($listBox.SelectedItem)
     reg add "HKLM\System\CurrentControlSet\Services\zapret" /v zapret-discord-youtube /t REG_SZ /d $configName /f 2>&1 | Out-Null
     
-    # Запускаем службу
     Update-StatusBar "Starting service..." "Info"
     sc.exe start zapret 2>&1 | Out-Null
     Start-Sleep -Seconds 3
     
-    # Проверяем статус
     $serviceStatus = Get-ServiceStatus "zapret"
     if ($serviceStatus -eq "Running") {
         Update-StatusBar "Service installed and running!" "Success"
         
-        # Дополнительно запускаем winws.exe напрямую (для надежности)
         try {
             Start-Process $winwsPath -ArgumentList $cmdLine -WindowStyle Hidden -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
@@ -558,7 +532,6 @@ function Install-ZapretService {
     } else {
         Update-StatusBar "Service created but not running" "Warning"
         
-        # Пробуем запустить напрямую
         try {
             Start-Process $winwsPath -ArgumentList $cmdLine -WindowStyle Hidden
             Start-Sleep -Seconds 2
@@ -780,7 +753,6 @@ function Run-Diagnostics {
     $report += "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     $report += ""
     
-    # Service status
     $serviceInfo = Get-ServiceInfo
     if ($serviceInfo.Installed) {
         $report += "[OK] Service installed: $($serviceInfo.Config)"
@@ -790,7 +762,6 @@ function Run-Diagnostics {
     }
     $report += ""
     
-    # Base Filtering Engine
     $bfe = Get-Service -Name BFE -ErrorAction SilentlyContinue
     if ($bfe -and $bfe.Status -eq "Running") { 
         $report += "[OK] Base Filtering Engine running" 
@@ -798,10 +769,8 @@ function Run-Diagnostics {
         $report += "[X] Base Filtering Engine NOT running" 
     }
     
-    # TCP timestamps
     $report += "[OK] TCP configured"
     
-    # Check for common conflicts
     $conflicts = @()
     $services = sc.exe query | Out-String
     
@@ -815,7 +784,6 @@ function Run-Diagnostics {
         $report += "[OK] No known conflicts"
     }
     
-    # WinDivert
     $binPath = Join-Path $ScriptPath "bin"
     if (Test-Path "$binPath\*.sys") { 
         $report += "[OK] WinDivert64.sys found" 
@@ -826,7 +794,6 @@ function Run-Diagnostics {
     $report += ""
     $report += "=== END REPORT ==="
     
-    # Show diagnostics
     $diagForm = New-Object System.Windows.Forms.Form
     $diagForm.Text = "Diagnostics Report"
     $diagForm.Size = New-Object System.Drawing.Size(400, 380) 
@@ -982,7 +949,6 @@ function Test-NetworkSettings {
     $diagForm.ShowDialog()
 }
 
-# Создаем главную форму
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Zapret Service Manager v$LOCAL_VERSION"
 $form.Size = New-Object System.Drawing.Size(525, 650)
@@ -992,7 +958,6 @@ $form.MaximizeBox = $false
 $form.BackColor = $colors.Midnight
 $form.ForeColor = $colors.Light
 
-# Status Panel
 $statusPanel = New-Object System.Windows.Forms.Panel
 $statusPanel.Location = New-Object System.Drawing.Point(0, 0)
 $statusPanel.Size = New-Object System.Drawing.Size(550, 55)  
@@ -1018,7 +983,6 @@ $statusIcon.ForeColor = $colors.Success
 $statusIcon.TextAlign = "MiddleCenter"
 $statusPanel.Controls.Add($statusIcon)
 
-# SERVICE CONTROL Section
 $lblService = New-Object System.Windows.Forms.Label
 $lblService.Location = New-Object System.Drawing.Point(15, 65)
 $lblService.Size = New-Object System.Drawing.Size(480, 25)
@@ -1111,7 +1075,6 @@ $btnRestart.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnRestart.Add_Click({ Restart-ZapretService })
 $form.Controls.Add($btnRestart)
 
-# SETTINGS Section
 $lblSettings = New-Object System.Windows.Forms.Label
 $lblSettings.Location = New-Object System.Drawing.Point(15, 200)
 $lblSettings.Size = New-Object System.Drawing.Size(480, 25)
@@ -1156,7 +1119,6 @@ $btnAutoUpdate.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnAutoUpdate.Add_Click({ Toggle-AutoUpdate })
 $form.Controls.Add($btnAutoUpdate)
 
-# UPDATES Section
 $lblUpdates = New-Object System.Windows.Forms.Label
 $lblUpdates.Location = New-Object System.Drawing.Point(15, 385)
 $lblUpdates.Size = New-Object System.Drawing.Size(480, 25)
@@ -1201,7 +1163,6 @@ $btnCheckUpdates.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnCheckUpdates.Add_Click({ Check-Updates })
 $form.Controls.Add($btnCheckUpdates)
 
-# TOOLS Section
 $lblTools = New-Object System.Windows.Forms.Label
 $lblTools.Location = New-Object System.Drawing.Point(15, 470)
 $lblTools.Size = New-Object System.Drawing.Size(480, 25)
@@ -1246,14 +1207,11 @@ $btnNetworkTest.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnNetworkTest.Add_Click({ Test-NetworkSettings })
 $form.Controls.Add($btnNetworkTest)
 
-# Инициализация статуса
 Update-StatusDisplay
 Update-ServiceStatusBar
 
-# Авто-проверка обновлений если включено
 if ((Get-UpdateCheckStatus) -eq "enabled") {
     Check-Updates -AutoCheck $true
 }
 
-# Запуск формы
 [void]$form.ShowDialog()
