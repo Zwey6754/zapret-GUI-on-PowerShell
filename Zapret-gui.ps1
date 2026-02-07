@@ -1,5 +1,3 @@
-#Requires -Version 3.0
-
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
