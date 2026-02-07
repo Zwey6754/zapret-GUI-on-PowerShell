@@ -15,7 +15,7 @@ if (-not $isAdmin) {
 Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);'
 [Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0) | Out-Null
 
-$LOCAL_VERSION = "1.9.3"
+$LOCAL_VERSION = "1.9.5"
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 # Enhanced Color scheme with dark tones
@@ -254,17 +254,118 @@ function Restart-ZapretService {
     Update-StatusDisplay
 }
 
+function Parse-BatFileNew {
+    param(
+        [string]$FilePath,
+        [string]$BinPath,
+        [string]$ListsPath,
+        [string]$GameFilter
+    )
+    
+    try {
+        $content = Get-Content $FilePath -Raw -Encoding Default
+        
+        $content = $content -replace '(?m)^\s*::', ''
+        $content = $content -replace '(?m)^\s*rem\s.*$', ''
+        $content = $content -replace '\^\s*[\r\n]+\s*', ' '
+        
+        $allMatches = [regex]::Matches($content, 'winws\.exe["\s]+(.*?)(?=[\r\n]+[^-\s]|$)', 
+            [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        
+        if ($allMatches.Count -eq 0) {
+            return $null
+        }
+        
+        $argsLine = ($allMatches | Sort-Object {$_.Groups[1].Value.Length} -Descending | Select-Object -First 1).Groups[1].Value.Trim()
+        $argsLine = $argsLine -replace '^["'']\s*', ''
+        $argsLine = $argsLine -replace '%BIN%', ($BinPath.TrimEnd('\') + '\')
+        $argsLine = $argsLine -replace '%LISTS%', ($ListsPath.TrimEnd('\') + '\')
+        $argsLine = $argsLine -replace '%GameFilter%', $GameFilter
+        
+        $argsLine = $argsLine -replace '"@([^"]+)"', {
+            param($m)
+            $p = $m.Groups[1].Value
+            $f = Join-Path $ScriptPath $p
+            return "`"$f`""
+        }
+        
+        $argsLine = $argsLine -replace '"((?!.*:)[^"]+\.txt)"', {
+            param($m)
+            $p = $m.Groups[1].Value
+            if ($p -notmatch '^[a-zA-Z]:') {
+                $f = Join-Path $ScriptPath $p
+                return "`"$f`""
+            }
+            return $m.Value
+        }
+        
+        $argsLine = $argsLine -replace '\s+', ' '
+        $argsLine = $argsLine.Trim()
+        
+        return $argsLine
+    } catch {
+        return $null
+    }
+}
+
+# НОВАЯ ФУНКЦИЯ: Проверка наличия winws.exe (ИСПРАВЛЕННЫЙ СИНТАКСИС)
+function Test-WinwsExe {
+    param([string]$BinPath)
+    
+    $winwsPath = Join-Path $BinPath "winws.exe"
+    if (Test-Path $winwsPath) {
+        return $winwsPath
+    }
+    
+    # Ищем в других возможных местах - ПРАВИЛЬНЫЙ СИНТАКСИС МАССИВА
+    $possiblePaths = @(
+        $winwsPath
+        (Join-Path $ScriptPath "winws.exe")
+        (Join-Path (Join-Path $ScriptPath "..") "winws.exe")
+        (Join-Path (Join-Path $ScriptPath "bin") "winws.exe")
+    )
+    
+    foreach ($path in $possiblePaths) {
+        if (Test-Path $path) {
+            return $path
+        }
+    }
+    
+    return $null
+}
+
 # Service Functions
 function Install-ZapretService {
     Update-StatusBar "Preparing to install service..." "Info"
     
-    $batFiles = Get-ChildItem -Path $ScriptPath -Filter "*.bat" | 
-                Where-Object { $_.Name -notlike "service*" } |
-                Sort-Object { [Regex]::Replace($_.Name, '\d+', { $args[0].Value.PadLeft(8, '0') }) }
+    $batFiles = @()
+    if (Test-Path (Join-Path $ScriptPath "*.bat")) {
+        $batFiles = Get-ChildItem -LiteralPath $ScriptPath -Filter "*.bat" | 
+                    Where-Object { $_.Name -notlike "service*" } |
+                    Sort-Object { [Regex]::Replace($_.Name, '(\d+)', { $args[0].Value.PadLeft(8, '0') }) }
+    }
     
     if ($batFiles.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("No configuration files (.bat) found!", "Error", 0, 16)
-        Update-StatusBar "Installation cancelled" "Error"
+        # Проверяем в родительской директории
+        $parentPath = Split-Path $ScriptPath -Parent
+        if (Test-Path (Join-Path $parentPath "*.bat")) {
+            $batFiles = Get-ChildItem -Path $parentPath -Filter "*.bat" | 
+                        Where-Object { $_.Name -notlike "service*" } |
+                        Sort-Object Name
+        }
+    }
+    
+    if ($batFiles.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "No configuration files (.bat) found!`n`nMake sure:" +
+            "`n1. You have extracted the archive completely" +
+            "`n2. Configuration files are in the same folder" +
+            "`n3. Files have .bat extension",
+            "Error", 
+            [System.Windows.Forms.MessageBoxButtons]::OK, 
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+        Update-StatusBar "Installation cancelled - no config files" "Error"
         return
     }
     
@@ -291,7 +392,9 @@ function Install-ZapretService {
     $listBox.Font = New-Object System.Drawing.Font("Consolas", 10)
     $listBox.BackColor = $colors.DarkGray
     $listBox.ForeColor = $colors.Light
-    foreach ($file in $batFiles) { $listBox.Items.Add($file.Name) | Out-Null }
+    foreach ($file in $batFiles) { 
+        $listBox.Items.Add($file.Name) | Out-Null 
+    }
     $listBox.SelectedIndex = 0
     $selectForm.Controls.Add($listBox)
     
@@ -327,214 +430,153 @@ function Install-ZapretService {
         return
     }
     
-    $selectedFile = Join-Path $ScriptPath $listBox.SelectedItem
+    $selectedFile = Join-Path $batFiles[$listBox.SelectedIndex].DirectoryName $listBox.SelectedItem
     $binPath = Join-Path $ScriptPath "bin"
     $listsPath = Join-Path $ScriptPath "lists"
     $gameStatus = Get-GameFilterStatus
     $gameFilter = $gameStatus.Filter
     
-    # use new parser
-    Update-StatusBar "Parsing configuration..." "Info"
-    $cmdLine = Parse-BatFile -FilePath $selectedFile -BinPath $binPath -ListsPath $listsPath -GameFilter $gameFilter
+    # Проверяем наличие winws.exe
+    $winwsPath = Test-WinwsExe -BinPath $binPath
+    if (-not $winwsPath) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "winws.exe not found!`n`nMake sure:" +
+            "`n1. You have extracted ALL files from the archive" +
+            "`n2. winws.exe is in the 'bin' folder" +
+            "`n3. Antivirus didn't delete the file",
+            "Error", 
+            [System.Windows.Forms.MessageBoxButtons]::OK, 
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+        Update-StatusBar "Installation failed - winws.exe not found" "Error"
+        return
+    }
+    
+    # Парсим BAT файл НОВЫМ методом
+    Update-StatusBar "Parsing configuration file..." "Info"
+    $cmdLine = Parse-BatFileNew -FilePath $selectedFile -BinPath $binPath -ListsPath $listsPath -GameFilter $gameFilter
     
     if ([string]::IsNullOrWhiteSpace($cmdLine)) {
         Update-StatusBar "Failed to parse configuration!" "Error"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Cannot parse configuration file: $($listBox.SelectedItem)`n`n" +
+            "File format may be incorrect or corrupted.",
+            "Parse Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
         return
     }
-    
-    # show edit
-    $argsForm = New-Object System.Windows.Forms.Form
-    $argsForm.Text = "Review and Edit Arguments"
-    $argsForm.Size = New-Object System.Drawing.Size(800, 600)
-    $argsForm.StartPosition = "CenterScreen"
-    $argsForm.BackColor = $colors.Midnight
-    $argsForm.FormBorderStyle = "FixedDialog"
-    $argsForm.MaximizeBox = $false
-    
-    $lblInfo = New-Object System.Windows.Forms.Label
-    $lblInfo.Location = New-Object System.Drawing.Point(20, 15)
-    $lblInfo.Size = New-Object System.Drawing.Size(750, 40)
-    $lblInfo.Text = "Review the parsed arguments below. You can edit them if needed.`nClick Install to proceed or Cancel to abort."
-    $lblInfo.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $lblInfo.ForeColor = $colors.Light
-    $argsForm.Controls.Add($lblInfo)
-    
-    $textArgs = New-Object System.Windows.Forms.TextBox
-    $textArgs.Multiline = $true
-    $textArgs.ScrollBars = "Both"
-    $textArgs.WordWrap = $false
-    $textArgs.Location = New-Object System.Drawing.Point(20, 60)
-    $textArgs.Size = New-Object System.Drawing.Size(750, 430)
-    $textArgs.Text = $cmdLine
-    $textArgs.Font = New-Object System.Drawing.Font("Consolas", 9)
-    $textArgs.BackColor = $colors.DarkGray
-    $textArgs.ForeColor = $colors.Light
-    $argsForm.Controls.Add($textArgs)
-    
-    $btnInstallNow = New-Object System.Windows.Forms.Button
-    $btnInstallNow.Location = New-Object System.Drawing.Point(540, 505)
-    $btnInstallNow.Size = New-Object System.Drawing.Size(110, 40)
-    $btnInstallNow.Text = "Install"
-    $btnInstallNow.BackColor = $colors.Success
-    $btnInstallNow.ForeColor = $colors.White
-    $btnInstallNow.FlatStyle = "Flat"
-    $btnInstallNow.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $btnInstallNow.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnInstallNow.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $argsForm.Controls.Add($btnInstallNow)
-    
-    $btnCancelNow = New-Object System.Windows.Forms.Button
-    $btnCancelNow.Location = New-Object System.Drawing.Point(660, 505)
-    $btnCancelNow.Size = New-Object System.Drawing.Size(110, 40)
-    $btnCancelNow.Text = "Cancel"
-    $btnCancelNow.BackColor = $colors.Danger
-    $btnCancelNow.ForeColor = $colors.White
-    $btnCancelNow.FlatStyle = "Flat"
-    $btnCancelNow.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $btnCancelNow.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnCancelNow.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $argsForm.Controls.Add($btnCancelNow)
-    
-    $argsForm.AcceptButton = $btnInstallNow
-    $argsForm.CancelButton = $btnCancelNow
-    
-    if ($argsForm.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
-        Update-StatusBar "Installation cancelled" "Warning"
-        return
-    }
-    
-    # Get edited arguments
-    $cmdLine = $textArgs.Text.Trim()
     
     # Enable TCP timestamps
     netsh interface tcp set global timestamps=enabled | Out-Null
     
-    # delet old service 
+    # Stop and remove existing service
     Update-StatusBar "Removing old service..." "Info"
     Stop-ZapretService -Silent $true | Out-Null
     Start-Sleep -Milliseconds 500
-    sc.exe delete zapret 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 500
     
-    $winwsPath = Join-Path $binPath "winws.exe"
- 
-    $cmdLine = $cmdLine -replace '^\s*"|"\s*$', '' 
+    $existingService = Get-Service -Name "zapret" -ErrorAction SilentlyContinue
+    if ($existingService) {
+        sc.exe delete zapret 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 500
+    }
     
-    $fullCommand = "`"$winwsPath`" $cmdLine"
+    # Создаем службу через SC.EXE (как в service_new.bat)
+    Update-StatusBar "Creating service via SC.EXE..." "Info"
     
-    $serviceBinPath = "\`"$winwsPath\`" $cmdLine"
+    # Формируем команду для службы
+    $serviceBinPath = "`"$winwsPath`" $cmdLine"
     
-    Write-Host "Full command: $fullCommand"
-    Write-Host "Service binpath: $serviceBinPath"
+    # Используем команды как в service_new.bat
+    $scCommand = "sc.exe create zapret binPath= `"$serviceBinPath`" DisplayName= `"zapret`" start= auto"
+    Write-Host "SC Command: $scCommand"
     
-    Update-StatusBar "Creating service via PowerShell..." "Info"
+    $result = cmd.exe /c $scCommand 2>&1
+    Write-Host "SC Result: $result"
     
-    try {
-        $serviceName = "zapret"
-        $displayName = "zapret"
-        $description = "Zapret DPI bypass software"
-        
-        $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-        
-        if ($existingService) {
-            Stop-Service $serviceName -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 1
-            sc.exe delete $serviceName 2>&1 | Out-Null
-            Start-Sleep -Seconds 1
-        }
-        
-        # create service through New-Service
-        $service = New-Service -Name $serviceName `
-                               -BinaryPathName $fullCommand `
-                               -DisplayName $displayName `
-                               -Description $description `
-                               -StartupType Automatic `
-                               -ErrorAction Stop
-        
-        Update-StatusBar "Service created successfully" "Success"
-        
-        Set-Service -Name $serviceName -Description $description -ErrorAction SilentlyContinue
-        
-        $configName = [System.IO.Path]::GetFileNameWithoutExtension($listBox.SelectedItem)
-        reg add "HKLM\System\CurrentControlSet\Services\zapret" /v zapret-discord-youtube /t REG_SZ /d $configName /f 2>&1 | Out-Null
-        
-        Update-StatusBar "Starting service..." "Info"
-        Start-Service -Name $serviceName -ErrorAction Stop
-        
-
-        Start-Sleep -Seconds 2
-        $serviceStatus = Get-ServiceStatus "zapret"
-        $process = Get-Process -Name winws -ErrorAction SilentlyContinue
-        
-        if ($serviceStatus -eq "Running") {
-            Update-StatusBar "Service installed and running!" "Success"
-            
-            $message = "Zapret service installed and started successfully!`n`n"
-            $message += "Configuration: $configName`n"
-            $message += "Status: Running`n"
-            
-
-            Start-Process $winwsPath -ArgumentList $cmdLine -WindowStyle Hidden -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-            
-            $process = Get-Process -Name winws -ErrorAction SilentlyContinue
-            if ($process) {
-                Update-StatusBar "winws.exe started manually" "Success"
-            }
-        }
-        
-    } catch {
-        Update-StatusBar "Trying sc.exe method..." "Warning"
+    if ($LASTEXITCODE -ne 0) {
+        # Пробуем альтернативный метод
+        Update-StatusBar "Trying alternative method..." "Warning"
         
         try {
-            $scCommand = "sc.exe create zapret binPath= `"$serviceBinPath`" DisplayName= `"zapret`" start= auto"
-            Write-Host "SC command: $scCommand"
-            
-            $result = cmd.exe /c $scCommand 2>&1
-            Write-Host "SC result: $result"
-            
-            if ($LASTEXITCODE -eq 0) {
-                Update-StatusBar "Service created via sc.exe" "Success"
-                
-                sc.exe description zapret "Zapret DPI bypass software" 2>&1 | Out-Null
-                
-                $configName = [System.IO.Path]::GetFileNameWithoutExtension($listBox.SelectedItem)
-                reg add "HKLM\System\CurrentControlSet\Services\zapret" /v zapret-discord-youtube /t REG_SZ /d $configName /f 2>&1 | Out-Null
-                
-                sc.exe start zapret 2>&1 | Out-Null
-                Start-Sleep -Seconds 2
-                
-                $serviceStatus = Get-ServiceStatus "zapret"
-                if ($serviceStatus -eq "Running") {
-                    Update-StatusBar "Service started via sc.exe" "Success"
-                } else {
-                    Update-StatusBar "Service created but failed to start" "Warning"
-                }
-            } else {
-                throw "sc.exe failed with exit code $LASTEXITCODE"
-            }
-            
+            # Пробуем через New-Service
+            $fullCommand = "`"$winwsPath`" $cmdLine"
+            New-Service -Name "zapret" `
+                       -BinaryPathName $fullCommand `
+                       -DisplayName "zapret" `
+                       -Description "Zapret DPI bypass software" `
+                       -StartupType Automatic `
+                       -ErrorAction Stop | Out-Null
+            Update-StatusBar "Service created via New-Service" "Success"
         } catch {
             Update-StatusBar "All methods failed: $($_.Exception.Message)" "Error"
             
             [System.Windows.Forms.MessageBox]::Show(
-                "Failed to create service using all methods.`n`n" +
+                "Failed to create service!`n`n" +
                 "Error: $($_.Exception.Message)`n`n" +
-                "You can try:`n" +
-                "1. Run original service.bat manually`n" +
-                "2. Check if winws.exe exists at:`n$winwsPath`n`n" +
-                "Command line was:`n$fullCommand",
-                "Error",
+                "Try to:" +
+                "`n1. Run 'service_new.bat' manually" +
+                "`n2. Check Windows Event Viewer" +
+                "`n3. Ensure you have admin rights",
+                "Service Creation Failed",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error
             )
             return
+        }
+    } else {
+        Update-StatusBar "Service created via SC.EXE" "Success"
+    }
+    
+    # Устанавливаем описание службы
+    sc.exe description zapret "Zapret DPI bypass software" 2>&1 | Out-Null
+    
+    # Сохраняем имя конфигурации в реестре
+    $configName = [System.IO.Path]::GetFileNameWithoutExtension($listBox.SelectedItem)
+    reg add "HKLM\System\CurrentControlSet\Services\zapret" /v zapret-discord-youtube /t REG_SZ /d $configName /f 2>&1 | Out-Null
+    
+    # Запускаем службу
+    Update-StatusBar "Starting service..." "Info"
+    sc.exe start zapret 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+    
+    # Проверяем статус
+    $serviceStatus = Get-ServiceStatus "zapret"
+    if ($serviceStatus -eq "Running") {
+        Update-StatusBar "Service installed and running!" "Success"
+        
+        # Дополнительно запускаем winws.exe напрямую (для надежности)
+        try {
+            Start-Process $winwsPath -ArgumentList $cmdLine -WindowStyle Hidden -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            $process = Get-Process -Name winws -ErrorAction SilentlyContinue
+            if ($process) {
+                Update-StatusBar "winws.exe also started directly" "Success"
+            }
+        } catch {
+            Write-Host "Note: Direct winws.exe start failed (may already be running)"
+        }
+    } else {
+        Update-StatusBar "Service created but not running" "Warning"
+        
+        # Пробуем запустить напрямую
+        try {
+            Start-Process $winwsPath -ArgumentList $cmdLine -WindowStyle Hidden
+            Start-Sleep -Seconds 2
+            $process = Get-Process -Name winws -ErrorAction SilentlyContinue
+            if ($process) {
+                Update-StatusBar "Service started directly" "Success"
+            }
+        } catch {
+            Update-StatusBar "Failed to start service directly" "Error"
         }
     }
     
     Update-ServiceStatusBar
     Update-StatusDisplay
 }
+
 function Toggle-GameFilter {
     $flagFile = Join-Path $ScriptPath "utils\game_filter.enabled"
     if (Test-Path $flagFile) {
@@ -636,28 +678,100 @@ function Update-HostsFile {
 }
 
 function Check-Updates {
-    Update-StatusBar "Checking for updates..." "Info"
+    param([bool]$AutoCheck = $false)
+    
+    if (-not $AutoCheck) {
+        Update-StatusBar "Checking for updates..." "Info"
+    }
+    
     $versionUrl = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt"
+    $downloadUrl = "https://github.com/Flowseal/zapret-discord-youtube/releases/latest"
+    
     try {
         $githubVersion = (Invoke-WebRequest -Uri $versionUrl -UseBasicParsing -TimeoutSec 5).Content.Trim()
+        
         if ($LOCAL_VERSION -eq $githubVersion) {
-            Update-StatusBar "Latest version: $LOCAL_VERSION" "Success"
+            if (-not $AutoCheck) {
+                Update-StatusBar "Latest version: $LOCAL_VERSION" "Success"
+                [System.Windows.Forms.MessageBox]::Show(
+                    "You have the latest version!`n`nCurrent: $LOCAL_VERSION",
+                    "Up to Date",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Information
+                )
+            }
         } else {
             Update-StatusBar "Update available: $githubVersion" "Warning"
+            
             $result = [System.Windows.Forms.MessageBox]::Show(
                 "New version available!`n`nCurrent: $LOCAL_VERSION`nLatest: $githubVersion`n`nOpen download page?",
-                "Update",
+                "Update Available",
                 [System.Windows.Forms.MessageBoxButtons]::YesNo,
                 [System.Windows.Forms.MessageBoxIcon]::Question
             )
+            
             if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
-                Start-Process "https://github.com/Flowseal/zapret-discord-youtube/releases/latest"
+                Start-Process $downloadUrl
+                Update-StatusBar "Download page opened" "Success"
+            } else {
+                Update-StatusBar "Update cancelled" "Info"
             }
         }
-#by_Zwey
     } catch {
-        Update-StatusBar "Check failed: $($_.Exception.Message)" "Error"
+        if (-not $AutoCheck) {
+            Update-StatusBar "Check failed: $($_.Exception.Message)" "Error"
+        }
     }
+}
+
+function Remove-ZapretService {
+    Update-StatusBar "Removing services..." "Info"
+    
+    $servicesToRemove = @("zapret", "WinDivert", "WinDivert14", "GoodbyeDPI", "discordfix_zapret", "winws1", "winws2")
+    
+    foreach ($service in $servicesToRemove) {
+        sc.exe stop $service 2>&1 | Out-Null
+        sc.exe delete $service 2>&1 | Out-Null
+        Write-Host "Attempted to remove service: $service"
+    }
+    
+    Get-Process -Name winws -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    
+    Update-StatusBar "Services removed successfully!" "Success"
+    Update-ServiceStatusBar
+    Update-StatusDisplay
+    return "Success"
+}
+
+function Show-ServiceStatus {
+    $serviceInfo = Get-ServiceInfo
+    $message = "Zapret Service Status:`n`n"
+    
+    if ($serviceInfo.Installed) {
+        $message += "Service: Installed`n"
+        $message += "Status: $($serviceInfo.Status)`n"
+        $message += "Config: $($serviceInfo.Config)`n"
+    } else {
+        $message += "Service: Not installed`n"
+    }
+    
+    $message += "`nWinDivert64.sys: "
+    $winDivertPath = Join-Path $ScriptPath "bin\WinDivert64.sys"
+    if (Test-Path $winDivertPath) {
+        $message += "Found`n"
+    } else {
+        $message += "Not found`n"
+    }
+    
+    $winwsProcess = Get-Process -Name winws -ErrorAction SilentlyContinue
+    $message += "winws.exe process: "
+    if ($winwsProcess) {
+        $message += "Running ($($winwsProcess.Count) instances)`n"
+    } else {
+        $message += "Not running`n"
+    }
+    
+    [System.Windows.Forms.MessageBox]::Show($message, "Service Status", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
 }
 
 function Run-Diagnostics {
@@ -686,26 +800,22 @@ function Run-Diagnostics {
         $report += "[X] Base Filtering Engine NOT running" 
     }
     
-    # Proxy check
-    $proxy = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue
-    if ($proxy.ProxyEnable -eq 1) { 
-        $report += "[!] Proxy enabled: $($proxy.ProxyServer)" 
-    } else { 
-        $report += "[OK] No proxy" 
-    }
-    
     # TCP timestamps
     $report += "[OK] TCP configured"
     
-    # Adguard
-    if (Get-Process -Name AdguardSvc -ErrorAction SilentlyContinue) { 
-        $report += "[X] Adguard detected" 
-    }
+    # Check for common conflicts
+    $conflicts = @()
+    $services = sc.exe query | Out-String
     
-    # Killer/SmartByte
-    $services = sc.exe query
-    if ($services -match "Killer") { $report += "[X] Killer found" }
-    if ($services -match "SmartByte") { $report += "[X] SmartByte found" }
+    if ($services -match "Killer") { $conflicts += "Killer" }
+    if ($services -match "SmartByte") { $conflicts += "SmartByte" }
+    if ($services -match "Adguard") { $conflicts += "Adguard" }
+    
+    if ($conflicts.Count -gt 0) {
+        $report += "[X] Conflicts detected: $($conflicts -join ', ')"
+    } else {
+        $report += "[OK] No known conflicts"
+    }
     
     # WinDivert
     $binPath = Join-Path $ScriptPath "bin"
@@ -715,31 +825,10 @@ function Run-Diagnostics {
         $report += "[X] WinDivert64.sys NOT found" 
     }
     
-    # VPN
-    if ($services -match "VPN") { $report += "[!] VPN detected" }
-    
-    # Discord cache status
-    $discordCacheDir = "$env:APPDATA\discord"
-    $cacheFolders = @("Cache", "Code Cache", "GPUCache")
-    $hasCache = $false
-    
-    foreach ($folder in $cacheFolders) {
-        $folderPath = Join-Path $discordCacheDir $folder
-        if (Test-Path $folderPath) {
-            $hasCache = $true
-            $size = "{0:N2}" -f ((Get-ChildItem $folderPath -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB)
-            $report += "[!] Discord $folder cache: ${size}MB"
-        }
-    }
-    
-    if (-not $hasCache) {
-        $report += "[OK] Discord cache not found or already cleaned"
-    }
-    
     $report += ""
     $report += "=== END REPORT ==="
     
-    # Show diagnostics in styled window
+    # Show diagnostics
     $diagForm = New-Object System.Windows.Forms.Form
     $diagForm.Text = "Diagnostics Report"
     $diagForm.Size = New-Object System.Drawing.Size(400, 380) 
@@ -760,23 +849,8 @@ function Run-Diagnostics {
     $textBox.BorderStyle = "None"
     $diagForm.Controls.Add($textBox)
 
-    $clearCacheBtn = New-Object System.Windows.Forms.Button
-    $clearCacheBtn.Location = New-Object System.Drawing.Point(50, 280)
-    $clearCacheBtn.Size = New-Object System.Drawing.Size(100, 40)
-    $clearCacheBtn.Text = "Clear Discord Cache"
-    $clearCacheBtn.BackColor = $colors.Warning
-    $clearCacheBtn.ForeColor = $colors.White
-    $clearCacheBtn.FlatStyle = "Flat"
-    $clearCacheBtn.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $clearCacheBtn.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $clearCacheBtn.Add_Click({
-        $diagForm.Close()
-        Clear-DiscordCache
-    })
-    $diagForm.Controls.Add($clearCacheBtn)
-    
     $closeBtn = New-Object System.Windows.Forms.Button
-    $closeBtn.Location = New-Object System.Drawing.Point(200, 280)
+    $closeBtn.Location = New-Object System.Drawing.Point(150, 280)
     $closeBtn.Size = New-Object System.Drawing.Size(100, 40)
     $closeBtn.Text = "Close"
     $closeBtn.BackColor = $colors.Primary
@@ -791,491 +865,56 @@ function Run-Diagnostics {
     $diagForm.ShowDialog()
 }
 
-function Run-Tests {
-    Update-StatusBar "Preparing tests..." "Info"
+function Clear-DiscordCache {
+    Update-StatusBar "Clearing Discord cache..." "Info"
     
+    $discordProcess = Get-Process -Name Discord -ErrorAction SilentlyContinue
+    if ($discordProcess) {
+        Stop-Process -Name Discord -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+    
+    $cachePaths = @(
+        "$env:APPDATA\discord\Cache",
+        "$env:APPDATA\discord\Code Cache",
+        "$env:APPDATA\discord\GPUCache"
+    )
+    
+    $clearedCount = 0
+    foreach ($path in $cachePaths) {
+        if (Test-Path $path) {
+            try {
+                Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+                $clearedCount++
+            } catch {
+                Write-Host "Failed to clear: $path"
+            }
+        }
+    }
+    
+    if ($clearedCount -gt 0) {
+        Update-StatusBar "Discord cache cleared ($clearedCount folders)" "Success"
+    } else {
+        Update-StatusBar "No Discord cache found" "Info"
+    }
+}
+
+function Run-Tests {
     $testScript = Join-Path $ScriptPath "utils\test zapret.ps1"
     if (-not (Test-Path $testScript)) {
         Update-StatusBar "Test script not found!" "Error"
         return
     }
     
-    # Store current service state
-    $serviceInfo = Get-ServiceInfo
-    $wasServiceInstalled = $serviceInfo.Installed
-    $wasServiceRunning = $serviceInfo.Running
-    $originalConfig = $serviceInfo.Config
-    
-    # Stop service if running
-    if ($wasServiceRunning) {
-        Update-StatusBar "Stopping service for tests..." "Warning"
-        Stop-ZapretService -Silent $true | Out-Null
-        Start-Sleep -Seconds 2
-    }
-    
-    # Kill any running winws processes
-    Get-Process -Name winws -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 500
-    
-    # Запускаем тесты в новом окне PowerShell
-    Update-StatusBar "Running configuration tests..." "Info"
+    Update-StatusBar "Running tests in PowerShell..." "Info"
     
     try {
-        # Создаем процесс PowerShell с тестовым скриптом
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = "powershell.exe"
-        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$testScript`""
-        $psi.WorkingDirectory = $ScriptPath
-        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
-        $psi.UseShellExecute = $true
-        
-        $process = [System.Diagnostics.Process]::Start($psi)
-        
-        $process.WaitForExit()
-        
-        Update-StatusBar "Tests completed" "Success"
-        
-
-        if ($wasServiceInstalled -and $originalConfig) {
-            Update-StatusBar "Restoring original service..." "Info"
-            
-
-            $configFile = Join-Path $ScriptPath "$originalConfig.bat"
-            if (Test-Path $configFile) {
-                $global:selectedFile = $configFile
-                $global:listBox = @{SelectedItem = "$originalConfig.bat"}
-                
-                $binPath = Join-Path $ScriptPath "bin"
-                $listsPath = Join-Path $ScriptPath "lists"
-                $gameStatus = Get-GameFilterStatus
-                $gameFilter = $gameStatus.Filter
-                
-                $fileLines = Get-Content $configFile
-                $capture = $false
-                $parsedArgs = ""
-                
-                foreach ($line in $fileLines) {
-                    if ($line -match 'winws\.exe') {
-                        $capture = $true
-                        $line = $line -replace '^.*winws\.exe', ''
-                    }
-                    
-                    if ($capture) {
-                        $line = $line.Trim()
-                        if ($line.EndsWith('^')) {
-                            $line = $line.Substring(0, $line.Length - 1).TrimEnd()
-                            $parsedArgs += $line + " "
-                        } else {
-                            $parsedArgs += $line + " "
-                            break
-                        }
-                    }
-                }
-                
-                $parsedArgs = $parsedArgs -replace '%BIN%', ($binPath + '\')
-                $parsedArgs = $parsedArgs -replace '%LISTS%', ($listsPath + '\')
-                $parsedArgs = $parsedArgs -replace '%GameFilter%', $gameFilter
-                $parsedArgs = $parsedArgs.Trim()
-                
-                $winwsPath = Join-Path $binPath "winws.exe"
-                $serviceBinPath = "\`"$winwsPath\`" $parsedArgs"
-                
-                sc.exe delete zapret 2>&1 | Out-Null
-                Start-Sleep -Milliseconds 500
-                
-                sc.exe create zapret binPath= $serviceBinPath DisplayName= "zapret" start= auto 2>&1 | Out-Null
-                sc.exe description zapret "Zapret DPI bypass software" | Out-Null
-                reg add "HKLM\System\CurrentControlSet\Services\zapret" /v zapret-discord-youtube /t REG_SZ /d $originalConfig /f 2>&1 | Out-Null
-                
-                if ($wasServiceRunning) {
-                    sc.exe start zapret 2>&1 | Out-Null
-                    Start-Sleep -Seconds 2
-                }
-                
-                Update-StatusBar "Original service restored: $originalConfig" "Success"
-            }
-        }
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$testScript`"" -WindowStyle Normal
+        Update-StatusBar "Tests launched" "Success"
     } catch {
-        Update-StatusBar "Error running tests: $($_.Exception.Message)" "Error"
+        Update-StatusBar "Failed to run tests: $_" "Error"
     }
-    
-    Update-ServiceStatusBar
-    Update-StatusDisplay
 }
-
-$form = New-Object System.Windows.Forms.Form
-$form.Text = "Zapret Service Manager v$LOCAL_VERSION"
-$form.Size = New-Object System.Drawing.Size(525, 650)
-$form.StartPosition = "CenterScreen"
-$form.FormBorderStyle = "FixedDialog"
-$form.MaximizeBox = $false
-$form.BackColor = $colors.Midnight
-$form.ForeColor = $colors.Light
-function Test-InstalledService {
-    $serviceInfo = Get-ServiceInfo
-    if (-not $serviceInfo.Installed) { return $false }
-
-    $service = Get-WmiObject Win32_Service -Filter "Name='zapret'" -ErrorAction SilentlyContinue
-    if (-not $service) { return $false }
-    
-    $binPath = $service.PathName
-    Write-Host "Service command line: $binPath"
-
-    if ($binPath -notmatch 'winws\.exe') {
-        Update-StatusBar "Service path doesn't contain winws.exe!" "Error"
-        return $false
-    }
-    
-    return $true
-}
-function Parse-BatFile {
-    param(
-        [string]$FilePath,
-        [string]$BinPath,
-        [string]$ListsPath,
-        [string]$GameFilter
-    )
-    
-    $content = Get-Content $FilePath -Raw
-    $lines = $content -split "`r`n"
-    
-    $capture = $false
-    $argsLine = ""
-    $inQuotes = $false
-    $escapeNext = $false
-    
-    foreach ($line in $lines) {
-        if ($line -match 'winws\.exe') {
-            $capture = $true
-
-            $line = $line -replace '^.*?winws\.exe', ''
-        }
-        
-        if ($capture) {
-            $chars = $line.ToCharArray()
-            for ($i = 0; $i -lt $chars.Length; $i++) {
-                $char = $chars[$i]
-                
-                if ($escapeNext) {
-                    $argsLine += $char
-                    $escapeNext = $false
-                    continue
-                }
-                
-                if ($char -eq '^') {
-                    if ($i -eq ($chars.Length - 1)) {
-                        continue
-                    } else {
-                        $argsLine += $char
-                    }
-                } elseif ($char -eq '"') {
-                    $argsLine += $char
-                    $inQuotes = -not $inQuotes
-                } elseif ($char -eq '\' -and $i -lt ($chars.Length - 1) -and $chars[$i + 1] -eq '^') {
-                    $escapeNext = $true
-                } else {
-                    $argsLine += $char
-                }
-            }
-            
-            if ($line -notmatch '\^$') {
-                break
-            }
-        }
-    }
-    
-    $argsLine = $argsLine -replace '%BIN%', ($BinPath + '\')
-    $argsLine = $argsLine -replace '%LISTS%', ($ListsPath + '\')
-    $argsLine = $argsLine -replace '%GameFilter%', $GameFilter
-
-    $argsLine = $argsLine -replace '(?<!["\w])(@|\.\\)([^"\s]+)', {
-        param($match)
-        $prefix = $match.Groups[1].Value
-        $path = $match.Groups[2].Value
-        
-        if ($prefix -eq '@') {
-            
-            $fullPath = Join-Path $ScriptPath $path
-        } else {
-          
-            $fullPath = Join-Path $ScriptPath $path
-        }
-        
-        "`"$fullPath`""
-    }
-    
-
-    $argsLine = $argsLine -replace '\s+', ' '
-    $argsLine = $argsLine.Trim()
-    
-    return $argsLine
-}
-
-
-$statusPanel = New-Object System.Windows.Forms.Panel
-$statusPanel.Location = New-Object System.Drawing.Point(0, 0)
-$statusPanel.Size = New-Object System.Drawing.Size(550, 55)  
-$statusPanel.BackColor = $colors.DarkPrimary 
-$statusPanel.BorderStyle = "FixedSingle"
-$form.Controls.Add($statusPanel)
-
-$statusLabel = New-Object System.Windows.Forms.Label
-$statusLabel.Location = New-Object System.Drawing.Point(10, 10)
-$statusLabel.Size = New-Object System.Drawing.Size(525, 35)  
-$statusLabel.Text = "  Zapret Service Manager v$LOCAL_VERSION - Ready"
-$statusLabel.ForeColor = $colors.Light
-$statusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-$statusLabel.TextAlign = "MiddleLeft"
-$statusPanel.Controls.Add($statusLabel)
-
-
-$statusIcon = New-Object System.Windows.Forms.Label
-$statusIcon.Location = New-Object System.Drawing.Point(10, 15)
-$statusIcon.Size = New-Object System.Drawing.Size(20, 20)
-$statusIcon.Text = "●"
-$statusIcon.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
-$statusIcon.ForeColor = $colors.Success
-$statusIcon.TextAlign = "MiddleCenter"
-$statusPanel.Controls.Add($statusIcon)
-
-
-$lblService = New-Object System.Windows.Forms.Label
-$lblService.Location = New-Object System.Drawing.Point(15, 65)
-$lblService.Size = New-Object System.Drawing.Size(480, 25)
-$lblService.Text = "SERVICE CONTROL"
-$lblService.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-$lblService.ForeColor = $colors.Light
-$form.Controls.Add($lblService)
-
-$btnInstall = New-Object System.Windows.Forms.Button
-$btnInstall.Location = New-Object System.Drawing.Point(15, 95)
-$btnInstall.Size = New-Object System.Drawing.Size(150, 40)
-$btnInstall.Text = "Install Service"
-$btnInstall.BackColor = $colors.Success
-$btnInstall.ForeColor = $colors.White
-$btnInstall.FlatStyle = "Flat"
-$btnInstall.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnInstall.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnInstall.Add_Click({ Install-ZapretService })
-$form.Controls.Add($btnInstall)
-
-$btnStopService = New-Object System.Windows.Forms.Button
-$btnStopService.Location = New-Object System.Drawing.Point(177, 95)
-$btnStopService.Size = New-Object System.Drawing.Size(150, 40)
-$btnStopService.Text = "Stop Service"
-$btnStopService.BackColor = $colors.Slate
-$btnStopService.ForeColor = $colors.White
-$btnStopService.FlatStyle = "Flat"
-$btnStopService.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnStopService.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnStopService.Add_Click({ 
-    if (Stop-ZapretService) {
-        Update-StatusBar "Service stopped" "Warning"
-        Update-ServiceStatusBar
-        Update-StatusDisplay
-    }
-})
-$form.Controls.Add($btnStopService)
-
-$btnStartService = New-Object System.Windows.Forms.Button
-$btnStartService.Location = New-Object System.Drawing.Point(340, 95)
-$btnStartService.Size = New-Object System.Drawing.Size(150, 40)
-$btnStartService.Text = "Start Service"
-$btnStartService.BackColor = $colors.Slate
-$btnStartService.ForeColor = $colors.White
-$btnStartService.FlatStyle = "Flat"
-$btnStartService.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnStartService.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnStartService.Add_Click({ 
-    if (Start-ZapretService) {
-        Update-StatusBar "Service started" "Success"
-        Update-ServiceStatusBar
-        Update-StatusDisplay
-    }
-})
-$form.Controls.Add($btnStartService)
-
-function Remove-ZapretService {
-    Update-StatusBar "Removing services..." "Info"
-    sc.exe stop zapret 2>&1 | Out-Null
-    sc.exe delete zapret 2>&1 | Out-Null
-    Get-Process -Name winws -ErrorAction SilentlyContinue | Stop-Process -Force
-    sc.exe stop WinDivert 2>&1 | Out-Null
-    sc.exe delete WinDivert 2>&1 | Out-Null
-    sc.exe stop WinDivert14 2>&1 | Out-Null
-    sc.exe delete WinDivert14 2>&1 | Out-Null
-    Update-StatusBar "Services removed successfully!" "Success"
-     return "Success"
-}
-
-$btnRemove = New-Object System.Windows.Forms.Button
-$btnRemove.Location = New-Object System.Drawing.Point(15, 145)
-$btnRemove.Size = New-Object System.Drawing.Size(150, 40)
-$btnRemove.Text = "Remove Services"
-$btnRemove.BackColor = $colors.Danger
-$btnRemove.ForeColor = $colors.White
-$btnRemove.FlatStyle = "Flat"
-$btnRemove.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnRemove.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnRemove.Add_Click({ Remove-ZapretService })
-$form.Controls.Add($btnRemove)
-
-$btnStatus = New-Object System.Windows.Forms.Button
-$btnStatus.Location = New-Object System.Drawing.Point(177, 145)
-$btnStatus.Size = New-Object System.Drawing.Size(150, 40)
-$btnStatus.Text = "Check Status"
-$btnStatus.BackColor = $colors.Primary
-$btnStatus.ForeColor = $colors.White
-$btnStatus.FlatStyle = "Flat"
-$btnStatus.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnStatus.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnStatus.Add_Click({ Show-ServiceStatus })
-$form.Controls.Add($btnStatus)
-
-$btnRestart = New-Object System.Windows.Forms.Button
-$btnRestart.Location = New-Object System.Drawing.Point(340, 145)
-$btnRestart.Size = New-Object System.Drawing.Size(150, 40)
-$btnRestart.Text = "Restart Service"
-$btnRestart.BackColor = $colors.Warning
-$btnRestart.ForeColor = $colors.White
-$btnRestart.FlatStyle = "Flat"
-$btnRestart.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnRestart.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnRestart.Add_Click({ Restart-ZapretService })
-$form.Controls.Add($btnRestart)
-
-$lblSettings = New-Object System.Windows.Forms.Label
-$lblSettings.Location = New-Object System.Drawing.Point(15, 200)
-$lblSettings.Size = New-Object System.Drawing.Size(480, 25)
-$lblSettings.Text = "SETTINGS"
-$lblSettings.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-$lblSettings.ForeColor = $colors.Light
-$form.Controls.Add($lblSettings)
-
-$btnGameFilter = New-Object System.Windows.Forms.Button
-$btnGameFilter.Location = New-Object System.Drawing.Point(15, 230)
-$btnGameFilter.Size = New-Object System.Drawing.Size(475, 40)
-$btnGameFilter.Text = "Game Filter [...]"
-$btnGameFilter.BackColor = $colors.DarkGray
-$btnGameFilter.ForeColor = $colors.Light
-$btnGameFilter.FlatStyle = "Flat"
-$btnGameFilter.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$btnGameFilter.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnGameFilter.Add_Click({ Toggle-GameFilter })
-$form.Controls.Add($btnGameFilter)
-
-$btnIPSet = New-Object System.Windows.Forms.Button
-$btnIPSet.Location = New-Object System.Drawing.Point(15, 280)
-$btnIPSet.Size = New-Object System.Drawing.Size(475, 40)
-$btnIPSet.Text = "IPSet Filter [...]"
-$btnIPSet.BackColor = $colors.DarkGray
-$btnIPSet.ForeColor = $colors.Light
-$btnIPSet.FlatStyle = "Flat"
-$btnIPSet.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$btnIPSet.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnIPSet.Add_Click({ Toggle-IPSet })
-$form.Controls.Add($btnIPSet)
-
-$btnAutoUpdate = New-Object System.Windows.Forms.Button
-$btnAutoUpdate.Location = New-Object System.Drawing.Point(15, 330)
-$btnAutoUpdate.Size = New-Object System.Drawing.Size(475, 40)
-$btnAutoUpdate.Text = "Auto-Update Check [...]"
-$btnAutoUpdate.BackColor = $colors.DarkGray
-$btnAutoUpdate.ForeColor = $colors.Light
-$btnAutoUpdate.FlatStyle = "Flat"
-$btnAutoUpdate.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$btnAutoUpdate.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnAutoUpdate.Add_Click({ Toggle-AutoUpdate })
-$form.Controls.Add($btnAutoUpdate)
-
-$lblUpdates = New-Object System.Windows.Forms.Label
-$lblUpdates.Location = New-Object System.Drawing.Point(15, 385)
-$lblUpdates.Size = New-Object System.Drawing.Size(480, 25)
-$lblUpdates.Text = "UPDATES"
-$lblUpdates.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-$lblUpdates.ForeColor = $colors.Light
-$form.Controls.Add($lblUpdates)
-
-$btnUpdateIPSet = New-Object System.Windows.Forms.Button
-$btnUpdateIPSet.Location = New-Object System.Drawing.Point(15, 415)
-$btnUpdateIPSet.Size = New-Object System.Drawing.Size(150, 40)
-$btnUpdateIPSet.Text = "Update IPSet"
-$btnUpdateIPSet.BackColor = $colors.DarkGray
-$btnUpdateIPSet.ForeColor = $colors.Light
-$btnUpdateIPSet.FlatStyle = "Flat"
-$btnUpdateIPSet.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$btnUpdateIPSet.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnUpdateIPSet.Add_Click({ Update-IPSetList })
-$form.Controls.Add($btnUpdateIPSet)
-
-$btnUpdateHosts = New-Object System.Windows.Forms.Button
-$btnUpdateHosts.Location = New-Object System.Drawing.Point(177, 415)
-$btnUpdateHosts.Size = New-Object System.Drawing.Size(150, 40)
-$btnUpdateHosts.Text = "Update Hosts"
-$btnUpdateHosts.BackColor = $colors.DarkGray
-$btnUpdateHosts.ForeColor = $colors.Light
-$btnUpdateHosts.FlatStyle = "Flat"
-$btnUpdateHosts.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$btnUpdateHosts.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnUpdateHosts.Add_Click({ Update-HostsFile })
-$form.Controls.Add($btnUpdateHosts)
-
-$btnCheckUpdates = New-Object System.Windows.Forms.Button
-$btnCheckUpdates.Location = New-Object System.Drawing.Point(340, 415)
-$btnCheckUpdates.Size = New-Object System.Drawing.Size(150, 40)
-$btnCheckUpdates.Text = "Check Updates"
-$btnCheckUpdates.BackColor = $colors.DarkGray
-$btnCheckUpdates.ForeColor = $colors.Light
-$btnCheckUpdates.FlatStyle = "Flat"
-$btnCheckUpdates.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$btnCheckUpdates.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnCheckUpdates.Add_Click({ Check-Updates })
-$form.Controls.Add($btnCheckUpdates)
-
-$lblTools = New-Object System.Windows.Forms.Label
-$lblTools.Location = New-Object System.Drawing.Point(15, 470)
-$lblTools.Size = New-Object System.Drawing.Size(480, 25)
-$lblTools.Text = "TOOLS"
-$lblTools.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-$lblTools.ForeColor = $colors.Light
-$form.Controls.Add($lblTools)
-
-$btnDiagnostics = New-Object System.Windows.Forms.Button
-$btnDiagnostics.Location = New-Object System.Drawing.Point(15, 500)
-$btnDiagnostics.Size = New-Object System.Drawing.Size(230, 40)
-$btnDiagnostics.Text = "Run Diagnostics"
-$btnDiagnostics.BackColor = $colors.Warning
-$btnDiagnostics.ForeColor = $colors.White
-$btnDiagnostics.FlatStyle = "Flat"
-$btnDiagnostics.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnDiagnostics.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnDiagnostics.Add_Click({ Run-Diagnostics })
-$form.Controls.Add($btnDiagnostics)
-
-$btnTests = New-Object System.Windows.Forms.Button
-$btnTests.Location = New-Object System.Drawing.Point(260, 500)
-$btnTests.Size = New-Object System.Drawing.Size(230, 40)
-$btnTests.Text = "Run Tests"
-$btnTests.BackColor = $colors.DarkWarning
-$btnTests.ForeColor = $colors.White
-$btnTests.FlatStyle = "Flat"
-$btnTests.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnTests.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnTests.Add_Click({ Run-Tests })
-$form.Controls.Add($btnTests)
-$btnNetworkTest = New-Object System.Windows.Forms.Button
-$btnNetworkTest.Location = New-Object System.Drawing.Point(15, 550)
-$btnNetworkTest.Size = New-Object System.Drawing.Size(475, 40)
-$btnNetworkTest.Text = "Network Diagnostics"
-$btnNetworkTest.BackColor = $colors.Primary
-$btnNetworkTest.ForeColor = $colors.White
-$btnNetworkTest.FlatStyle = "Flat"
-$btnNetworkTest.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnNetworkTest.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnNetworkTest.Add_Click({ Test-NetworkSettings })
-$form.Controls.Add($btnNetworkTest)
-Update-StatusDisplay
-Update-ServiceStatusBar
 
 function Test-NetworkSettings {
     Update-StatusBar "Checking network settings..." "Info"
@@ -1344,4 +983,279 @@ function Test-NetworkSettings {
     Update-StatusBar "Network check complete" "Success"
     $diagForm.ShowDialog()
 }
+
+# Создаем главную форму
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Zapret Service Manager v$LOCAL_VERSION"
+$form.Size = New-Object System.Drawing.Size(525, 650)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
+$form.BackColor = $colors.Midnight
+$form.ForeColor = $colors.Light
+
+# Status Panel
+$statusPanel = New-Object System.Windows.Forms.Panel
+$statusPanel.Location = New-Object System.Drawing.Point(0, 0)
+$statusPanel.Size = New-Object System.Drawing.Size(550, 55)  
+$statusPanel.BackColor = $colors.DarkPrimary 
+$statusPanel.BorderStyle = "FixedSingle"
+$form.Controls.Add($statusPanel)
+
+$statusLabel = New-Object System.Windows.Forms.Label
+$statusLabel.Location = New-Object System.Drawing.Point(10, 10)
+$statusLabel.Size = New-Object System.Drawing.Size(525, 35)  
+$statusLabel.Text = "  Zapret Service Manager v$LOCAL_VERSION - Ready"
+$statusLabel.ForeColor = $colors.Light
+$statusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$statusLabel.TextAlign = "MiddleLeft"
+$statusPanel.Controls.Add($statusLabel)
+
+$statusIcon = New-Object System.Windows.Forms.Label
+$statusIcon.Location = New-Object System.Drawing.Point(10, 15)
+$statusIcon.Size = New-Object System.Drawing.Size(20, 20)
+$statusIcon.Text = "●"
+$statusIcon.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+$statusIcon.ForeColor = $colors.Success
+$statusIcon.TextAlign = "MiddleCenter"
+$statusPanel.Controls.Add($statusIcon)
+
+# SERVICE CONTROL Section
+$lblService = New-Object System.Windows.Forms.Label
+$lblService.Location = New-Object System.Drawing.Point(15, 65)
+$lblService.Size = New-Object System.Drawing.Size(480, 25)
+$lblService.Text = "SERVICE CONTROL"
+$lblService.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$lblService.ForeColor = $colors.Light
+$form.Controls.Add($lblService)
+
+$btnInstall = New-Object System.Windows.Forms.Button
+$btnInstall.Location = New-Object System.Drawing.Point(15, 95)
+$btnInstall.Size = New-Object System.Drawing.Size(150, 40)
+$btnInstall.Text = "Install Service"
+$btnInstall.BackColor = $colors.Success
+$btnInstall.ForeColor = $colors.White
+$btnInstall.FlatStyle = "Flat"
+$btnInstall.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnInstall.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnInstall.Add_Click({ Install-ZapretService })
+$form.Controls.Add($btnInstall)
+
+$btnStopService = New-Object System.Windows.Forms.Button
+$btnStopService.Location = New-Object System.Drawing.Point(177, 95)
+$btnStopService.Size = New-Object System.Drawing.Size(150, 40)
+$btnStopService.Text = "Stop Service"
+$btnStopService.BackColor = $colors.Slate
+$btnStopService.ForeColor = $colors.White
+$btnStopService.FlatStyle = "Flat"
+$btnStopService.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnStopService.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnStopService.Add_Click({ 
+    if (Stop-ZapretService) {
+        Update-StatusBar "Service stopped" "Warning"
+        Update-ServiceStatusBar
+        Update-StatusDisplay
+    }
+})
+$form.Controls.Add($btnStopService)
+
+$btnStartService = New-Object System.Windows.Forms.Button
+$btnStartService.Location = New-Object System.Drawing.Point(340, 95)
+$btnStartService.Size = New-Object System.Drawing.Size(150, 40)
+$btnStartService.Text = "Start Service"
+$btnStartService.BackColor = $colors.Slate
+$btnStartService.ForeColor = $colors.White
+$btnStartService.FlatStyle = "Flat"
+$btnStartService.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnStartService.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnStartService.Add_Click({ 
+    if (Start-ZapretService) {
+        Update-StatusBar "Service started" "Success"
+        Update-ServiceStatusBar
+        Update-StatusDisplay
+    }
+})
+$form.Controls.Add($btnStartService)
+
+$btnRemove = New-Object System.Windows.Forms.Button
+$btnRemove.Location = New-Object System.Drawing.Point(15, 145)
+$btnRemove.Size = New-Object System.Drawing.Size(150, 40)
+$btnRemove.Text = "Remove Services"
+$btnRemove.BackColor = $colors.Danger
+$btnRemove.ForeColor = $colors.White
+$btnRemove.FlatStyle = "Flat"
+$btnRemove.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnRemove.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnRemove.Add_Click({ Remove-ZapretService })
+$form.Controls.Add($btnRemove)
+
+$btnStatus = New-Object System.Windows.Forms.Button
+$btnStatus.Location = New-Object System.Drawing.Point(177, 145)
+$btnStatus.Size = New-Object System.Drawing.Size(150, 40)
+$btnStatus.Text = "Check Status"
+$btnStatus.BackColor = $colors.Primary
+$btnStatus.ForeColor = $colors.White
+$btnStatus.FlatStyle = "Flat"
+$btnStatus.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnStatus.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnStatus.Add_Click({ Show-ServiceStatus })
+$form.Controls.Add($btnStatus)
+
+$btnRestart = New-Object System.Windows.Forms.Button
+$btnRestart.Location = New-Object System.Drawing.Point(340, 145)
+$btnRestart.Size = New-Object System.Drawing.Size(150, 40)
+$btnRestart.Text = "Restart Service"
+$btnRestart.BackColor = $colors.Warning
+$btnRestart.ForeColor = $colors.White
+$btnRestart.FlatStyle = "Flat"
+$btnRestart.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnRestart.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnRestart.Add_Click({ Restart-ZapretService })
+$form.Controls.Add($btnRestart)
+
+# SETTINGS Section
+$lblSettings = New-Object System.Windows.Forms.Label
+$lblSettings.Location = New-Object System.Drawing.Point(15, 200)
+$lblSettings.Size = New-Object System.Drawing.Size(480, 25)
+$lblSettings.Text = "SETTINGS"
+$lblSettings.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$lblSettings.ForeColor = $colors.Light
+$form.Controls.Add($lblSettings)
+
+$btnGameFilter = New-Object System.Windows.Forms.Button
+$btnGameFilter.Location = New-Object System.Drawing.Point(15, 230)
+$btnGameFilter.Size = New-Object System.Drawing.Size(475, 40)
+$btnGameFilter.Text = "Game Filter [...]"
+$btnGameFilter.BackColor = $colors.DarkGray
+$btnGameFilter.ForeColor = $colors.Light
+$btnGameFilter.FlatStyle = "Flat"
+$btnGameFilter.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnGameFilter.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnGameFilter.Add_Click({ Toggle-GameFilter })
+$form.Controls.Add($btnGameFilter)
+
+$btnIPSet = New-Object System.Windows.Forms.Button
+$btnIPSet.Location = New-Object System.Drawing.Point(15, 280)
+$btnIPSet.Size = New-Object System.Drawing.Size(475, 40)
+$btnIPSet.Text = "IPSet Filter [...]"
+$btnIPSet.BackColor = $colors.DarkGray
+$btnIPSet.ForeColor = $colors.Light
+$btnIPSet.FlatStyle = "Flat"
+$btnIPSet.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnIPSet.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnIPSet.Add_Click({ Toggle-IPSet })
+$form.Controls.Add($btnIPSet)
+
+$btnAutoUpdate = New-Object System.Windows.Forms.Button
+$btnAutoUpdate.Location = New-Object System.Drawing.Point(15, 330)
+$btnAutoUpdate.Size = New-Object System.Drawing.Size(475, 40)
+$btnAutoUpdate.Text = "Auto-Update Check [...]"
+$btnAutoUpdate.BackColor = $colors.DarkGray
+$btnAutoUpdate.ForeColor = $colors.Light
+$btnAutoUpdate.FlatStyle = "Flat"
+$btnAutoUpdate.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnAutoUpdate.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnAutoUpdate.Add_Click({ Toggle-AutoUpdate })
+$form.Controls.Add($btnAutoUpdate)
+
+# UPDATES Section
+$lblUpdates = New-Object System.Windows.Forms.Label
+$lblUpdates.Location = New-Object System.Drawing.Point(15, 385)
+$lblUpdates.Size = New-Object System.Drawing.Size(480, 25)
+$lblUpdates.Text = "UPDATES"
+$lblUpdates.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$lblUpdates.ForeColor = $colors.Light
+$form.Controls.Add($lblUpdates)
+
+$btnUpdateIPSet = New-Object System.Windows.Forms.Button
+$btnUpdateIPSet.Location = New-Object System.Drawing.Point(15, 415)
+$btnUpdateIPSet.Size = New-Object System.Drawing.Size(150, 40)
+$btnUpdateIPSet.Text = "Update IPSet"
+$btnUpdateIPSet.BackColor = $colors.DarkGray
+$btnUpdateIPSet.ForeColor = $colors.Light
+$btnUpdateIPSet.FlatStyle = "Flat"
+$btnUpdateIPSet.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$btnUpdateIPSet.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnUpdateIPSet.Add_Click({ Update-IPSetList })
+$form.Controls.Add($btnUpdateIPSet)
+
+$btnUpdateHosts = New-Object System.Windows.Forms.Button
+$btnUpdateHosts.Location = New-Object System.Drawing.Point(177, 415)
+$btnUpdateHosts.Size = New-Object System.Drawing.Size(150, 40)
+$btnUpdateHosts.Text = "Update Hosts"
+$btnUpdateHosts.BackColor = $colors.DarkGray
+$btnUpdateHosts.ForeColor = $colors.Light
+$btnUpdateHosts.FlatStyle = "Flat"
+$btnUpdateHosts.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$btnUpdateHosts.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnUpdateHosts.Add_Click({ Update-HostsFile })
+$form.Controls.Add($btnUpdateHosts)
+
+$btnCheckUpdates = New-Object System.Windows.Forms.Button
+$btnCheckUpdates.Location = New-Object System.Drawing.Point(340, 415)
+$btnCheckUpdates.Size = New-Object System.Drawing.Size(150, 40)
+$btnCheckUpdates.Text = "Check Updates"
+$btnCheckUpdates.BackColor = $colors.DarkGray
+$btnCheckUpdates.ForeColor = $colors.Light
+$btnCheckUpdates.FlatStyle = "Flat"
+$btnCheckUpdates.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$btnCheckUpdates.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnCheckUpdates.Add_Click({ Check-Updates })
+$form.Controls.Add($btnCheckUpdates)
+
+# TOOLS Section
+$lblTools = New-Object System.Windows.Forms.Label
+$lblTools.Location = New-Object System.Drawing.Point(15, 470)
+$lblTools.Size = New-Object System.Drawing.Size(480, 25)
+$lblTools.Text = "TOOLS"
+$lblTools.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$lblTools.ForeColor = $colors.Light
+$form.Controls.Add($lblTools)
+
+$btnDiagnostics = New-Object System.Windows.Forms.Button
+$btnDiagnostics.Location = New-Object System.Drawing.Point(15, 500)
+$btnDiagnostics.Size = New-Object System.Drawing.Size(230, 40)
+$btnDiagnostics.Text = "Run Diagnostics"
+$btnDiagnostics.BackColor = $colors.Warning
+$btnDiagnostics.ForeColor = $colors.White
+$btnDiagnostics.FlatStyle = "Flat"
+$btnDiagnostics.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnDiagnostics.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnDiagnostics.Add_Click({ Run-Diagnostics })
+$form.Controls.Add($btnDiagnostics)
+
+$btnTests = New-Object System.Windows.Forms.Button
+$btnTests.Location = New-Object System.Drawing.Point(260, 500)
+$btnTests.Size = New-Object System.Drawing.Size(230, 40)
+$btnTests.Text = "Run Tests"
+$btnTests.BackColor = $colors.DarkWarning
+$btnTests.ForeColor = $colors.White
+$btnTests.FlatStyle = "Flat"
+$btnTests.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnTests.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnTests.Add_Click({ Run-Tests })
+$form.Controls.Add($btnTests)
+
+$btnNetworkTest = New-Object System.Windows.Forms.Button
+$btnNetworkTest.Location = New-Object System.Drawing.Point(15, 550)
+$btnNetworkTest.Size = New-Object System.Drawing.Size(475, 40)
+$btnNetworkTest.Text = "Network Diagnostics"
+$btnNetworkTest.BackColor = $colors.Primary
+$btnNetworkTest.ForeColor = $colors.White
+$btnNetworkTest.FlatStyle = "Flat"
+$btnNetworkTest.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+$btnNetworkTest.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnNetworkTest.Add_Click({ Test-NetworkSettings })
+$form.Controls.Add($btnNetworkTest)
+
+# Инициализация статуса
+Update-StatusDisplay
+Update-ServiceStatusBar
+
+# Авто-проверка обновлений если включено
+if ((Get-UpdateCheckStatus) -eq "enabled") {
+    Check-Updates -AutoCheck $true
+}
+
+# Запуск формы
 [void]$form.ShowDialog()
