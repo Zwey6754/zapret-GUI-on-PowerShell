@@ -11,7 +11,7 @@ if (-not $isAdmin) {
 Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);'
 [Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0) | Out-Null
 
-$LOCAL_VERSION = "1.9.5"
+$LOCAL_VERSION = "1.9.6"
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $colors = @{
@@ -655,8 +655,8 @@ function Check-Updates {
         Update-StatusBar "Checking for updates..." "Info"
     }
     
-    $versionUrl = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt"
-    $downloadUrl = "https://github.com/Flowseal/zapret-discord-youtube/releases/latest"
+    $versionUrl = "https://raw.githubusercontent.com/Zwey6754/zapret-GUI-on-PowerShell/main/.service/version.txt"
+    $downloadUrl = "https://github.com/Zwey6754/zapret-GUI-on-PowerShell/releases/latest"
     
     try {
         $githubVersion = (Invoke-WebRequest -Uri $versionUrl -UseBasicParsing -TimeoutSec 5).Content.Trim()
