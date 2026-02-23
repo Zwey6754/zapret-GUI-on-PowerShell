@@ -11,7 +11,7 @@ if (-not $isAdmin) {
 Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);'
 [Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0) | Out-Null
 
-$LOCAL_VERSION = "1.9.6"
+$LOCAL_VERSION = "1.9.7"
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $colors = @{
@@ -124,10 +124,16 @@ function Update-ServiceStatusBar {
 
 function Get-GameFilterStatus {
     $flagFile = Join-Path $ScriptPath "utils\game_filter.enabled"
-    if (Test-Path $flagFile) {
-        return @{Status="enabled"; Filter="1024-65535"}
+    if (-not (Test-Path $flagFile)) {
+        return @{Status="disabled"; Filter="12"; FilterTCP="12"; FilterUDP="12"}
     }
-    return @{Status="disabled"; Filter="12"}
+    $mode = ((Get-Content $flagFile -ErrorAction SilentlyContinue | Select-Object -First 1) + "").Trim().ToLower()
+    switch ($mode) {
+        "all" { return @{Status="enabled (TCP+UDP)"; Filter="1024-65535"; FilterTCP="1024-65535"; FilterUDP="1024-65535"} }
+        "tcp" { return @{Status="enabled (TCP)";     Filter="1024-65535"; FilterTCP="1024-65535"; FilterUDP="12"        } }
+        "udp" { return @{Status="enabled (UDP)";     Filter="1024-65535"; FilterTCP="12";         FilterUDP="1024-65535"} }
+        default { return @{Status="enabled (TCP+UDP)"; Filter="1024-65535"; FilterTCP="1024-65535"; FilterUDP="1024-65535"} }
+    }
 }
 
 function Get-IPSetStatus {
@@ -143,6 +149,23 @@ function Get-UpdateCheckStatus {
     $flagFile = Join-Path $ScriptPath "utils\check_updates.enabled"
     if (Test-Path $flagFile) { return "enabled" }
     return "disabled"
+}
+
+function Initialize-UserLists {
+    $listsPath = Join-Path $ScriptPath "lists"
+    if (-not (Test-Path $listsPath)) { New-Item -ItemType Directory -Path $listsPath -Force | Out-Null }
+
+    $defaults = @{
+        "ipset-exclude-user.txt"  = "203.0.113.113/32"
+        "list-general-user.txt"   = "domain.example.abc"
+        "list-exclude-user.txt"   = "domain.example.abc"
+    }
+    foreach ($fileName in $defaults.Keys) {
+        $filePath = Join-Path $listsPath $fileName
+        if (-not (Test-Path $filePath)) {
+            $defaults[$fileName] | Out-File -FilePath $filePath -Encoding UTF8 -NoNewline
+        }
+    }
 }
 
 function Update-StatusDisplay {
@@ -250,7 +273,9 @@ function Parse-BatFileNew {
         [string]$FilePath,
         [string]$BinPath,
         [string]$ListsPath,
-        [string]$GameFilter
+        [string]$GameFilter,
+        [string]$GameFilterTCP = "12",
+        [string]$GameFilterUDP = "12"
     )
     
     try {
@@ -272,6 +297,8 @@ function Parse-BatFileNew {
         $argsLine = $argsLine -replace '%BIN%', ($BinPath.TrimEnd('\') + '\')
         $argsLine = $argsLine -replace '%LISTS%', ($ListsPath.TrimEnd('\') + '\')
         $argsLine = $argsLine -replace '%GameFilter%', $GameFilter
+        $argsLine = $argsLine -replace '%GameFilterTCP%', $GameFilterTCP
+        $argsLine = $argsLine -replace '%GameFilterUDP%', $GameFilterUDP
         
         $argsLine = $argsLine -replace '"@([^"]+)"', {
             param($m)
@@ -329,7 +356,7 @@ function Install-ZapretService {
     $batFiles = @()
     if (Test-Path (Join-Path $ScriptPath "*.bat")) {
         $batFiles = Get-ChildItem -LiteralPath $ScriptPath -Filter "*.bat" | 
-                    Where-Object { $_.Name -notlike "service*" } |
+                    Where-Object { $_.Name -notlike "service*" -and $_.Name -notlike "!*" } |
                     Sort-Object { [Regex]::Replace($_.Name, '(\d+)', { $args[0].Value.PadLeft(8, '0') }) }
     }
     
@@ -337,7 +364,7 @@ function Install-ZapretService {
         $parentPath = Split-Path $ScriptPath -Parent
         if (Test-Path (Join-Path $parentPath "*.bat")) {
             $batFiles = Get-ChildItem -Path $parentPath -Filter "*.bat" | 
-                        Where-Object { $_.Name -notlike "service*" } |
+                        Where-Object { $_.Name -notlike "service*" -and $_.Name -notlike "!*" } |
                         Sort-Object Name
         }
     }
@@ -421,6 +448,8 @@ function Install-ZapretService {
     $listsPath = Join-Path $ScriptPath "lists"
     $gameStatus = Get-GameFilterStatus
     $gameFilter = $gameStatus.Filter
+    $gameFilterTCP = $gameStatus.FilterTCP
+    $gameFilterUDP = $gameStatus.FilterUDP
     
     $winwsPath = Test-WinwsExe -BinPath $binPath
     if (-not $winwsPath) {
@@ -438,7 +467,7 @@ function Install-ZapretService {
     }
     
     Update-StatusBar "Parsing configuration file..." "Info"
-    $cmdLine = Parse-BatFileNew -FilePath $selectedFile -BinPath $binPath -ListsPath $listsPath -GameFilter $gameFilter
+    $cmdLine = Parse-BatFileNew -FilePath $selectedFile -BinPath $binPath -ListsPath $listsPath -GameFilter $gameFilter -GameFilterTCP $gameFilterTCP -GameFilterUDP $gameFilterUDP
     
     if ([string]::IsNullOrWhiteSpace($cmdLine)) {
         Update-StatusBar "Failed to parse configuration!" "Error"
@@ -549,15 +578,27 @@ function Install-ZapretService {
 }
 
 function Toggle-GameFilter {
-    $flagFile = Join-Path $ScriptPath "utils\game_filter.enabled"
-    if (Test-Path $flagFile) {
-        Remove-Item $flagFile -Force
-        Update-StatusBar "Game filter disabled" "Warning"
+    $flagFile  = Join-Path $ScriptPath "utils\game_filter.enabled"
+    $utilsPath = Join-Path $ScriptPath "utils"
+
+    # Cycle: disabled -> all -> tcp -> udp -> disabled
+    $current = (Get-GameFilterStatus).Status
+    switch -Wildcard ($current) {
+        "disabled"         { $next = "all" }
+        "enabled (TCP+UDP)"{ $next = "tcp" }
+        "enabled (TCP)"    { $next = "udp" }
+        default            { $next = "disabled" }
+    }
+
+    if (-not (Test-Path $utilsPath)) { New-Item -ItemType Directory -Path $utilsPath -Force | Out-Null }
+
+    $labels = @{all="TCP+UDP"; tcp="TCP only"; udp="UDP only"}
+    if ($next -eq "disabled") {
+        if (Test-Path $flagFile) { Remove-Item $flagFile -Force }
+        Update-StatusBar "Game filter: disabled - restart service to apply" "Warning"
     } else {
-        $utilsPath = Join-Path $ScriptPath "utils"
-        if (-not (Test-Path $utilsPath)) { New-Item -ItemType Directory -Path $utilsPath -Force | Out-Null }
-        "ENABLED" | Out-File -FilePath $flagFile -Encoding ASCII
-        Update-StatusBar "Game filter enabled" "Warning"
+        $next | Out-File -FilePath $flagFile -Encoding ASCII -NoNewline
+        Update-StatusBar "Game filter: $($labels[$next]) - restart service to apply" "Warning"
     }
     Update-StatusDisplay
 }
@@ -747,12 +788,13 @@ function Show-ServiceStatus {
 
 function Run-Diagnostics {
     Update-StatusBar "Running diagnostics..." "Info"
-    
+
     $report = @()
     $report += "=== DIAGNOSTICS REPORT ==="
     $report += "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     $report += ""
-    
+
+    # --- Service ---
     $serviceInfo = Get-ServiceInfo
     if ($serviceInfo.Installed) {
         $report += "[OK] Service installed: $($serviceInfo.Config)"
@@ -760,63 +802,164 @@ function Run-Diagnostics {
     } else {
         $report += "[X] Service not installed"
     }
+
+    # winws.exe process
+    $winwsProc = Get-Process -Name winws -ErrorAction SilentlyContinue
+    $report += "[$(if($winwsProc){'OK'}else{'X'})] winws.exe: $(if($winwsProc){"Running ($($winwsProc.Count))"}else{'Not running'})"
     $report += ""
-    
-    $bfe = Get-Service -Name BFE -ErrorAction SilentlyContinue
-    if ($bfe -and $bfe.Status -eq "Running") { 
-        $report += "[OK] Base Filtering Engine running" 
-    } else { 
-        $report += "[X] Base Filtering Engine NOT running" 
-    }
-    
-    $report += "[OK] TCP configured"
-    
-    $conflicts = @()
-    $services = sc.exe query | Out-String
-    
-    if ($services -match "Killer") { $conflicts += "Killer" }
-    if ($services -match "SmartByte") { $conflicts += "SmartByte" }
-    if ($services -match "Adguard") { $conflicts += "Adguard" }
-    
-    if ($conflicts.Count -gt 0) {
-        $report += "[X] Conflicts detected: $($conflicts -join ', ')"
-    } else {
-        $report += "[OK] No known conflicts"
-    }
-    
+
+    # --- WinDivert64.sys ---
     $binPath = Join-Path $ScriptPath "bin"
-    if (Test-Path "$binPath\*.sys") { 
-        $report += "[OK] WinDivert64.sys found" 
-    } else { 
-        $report += "[X] WinDivert64.sys NOT found" 
+    if (Test-Path "$binPath\*.sys") {
+        $report += "[OK] WinDivert64.sys found"
+    } else {
+        $report += "[X] WinDivert64.sys NOT found"
     }
-    
+
+    # WinDivert conflict (active without winws)
+    $wdStatus = (sc.exe query WinDivert 2>&1 | Out-String)
+    if ($wdStatus -match "RUNNING|STOP_PENDING") {
+        if (-not $winwsProc) {
+            $report += "[!] WinDivert active but winws.exe not running - possible conflict"
+        } else {
+            $report += "[OK] WinDivert service active"
+        }
+    }
+    $report += ""
+
+    # --- Base Filtering Engine ---
+    $bfe = Get-Service -Name BFE -ErrorAction SilentlyContinue
+    if ($bfe -and $bfe.Status -eq "Running") {
+        $report += "[OK] Base Filtering Engine running"
+    } else {
+        $report += "[X] Base Filtering Engine NOT running (required for zapret)"
+    }
+
+    # --- TCP Timestamps ---
+    $tcpTs = netsh interface tcp show global 2>&1 | Out-String
+    if ($tcpTs -match "timestamps.*enabled" -or $tcpTs -match "enabled.*timestamps") {
+        $report += "[OK] TCP Timestamps enabled"
+    } else {
+        $report += "[!] TCP Timestamps disabled - enabling..."
+        netsh interface tcp set global timestamps=enabled 2>&1 | Out-Null
+        $report += "    -> attempted to enable automatically"
+    }
+    $report += ""
+
+    # --- Proxy ---
+    $proxyEnabled = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).ProxyEnable
+    if ($proxyEnabled -eq 1) {
+        $proxyServer = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).ProxyServer
+        $report += "[!] System proxy enabled: $proxyServer"
+        $report += "    -> verify proxy is valid or disable if unused"
+    } else {
+        $report += "[OK] No system proxy"
+    }
+
+    # --- DNS / DoH ---
+    try {
+        $dohCount = (Get-ChildItem -Recurse -Path "HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\" -ErrorAction SilentlyContinue |
+            Get-ItemProperty -ErrorAction SilentlyContinue |
+            Where-Object { $_.DohFlags -gt 0 } |
+            Measure-Object).Count
+        if ($dohCount -gt 0) {
+            $report += "[OK] Encrypted DNS (DoH) configured"
+        } else {
+            $report += "[!] No encrypted DNS found - configure DoH in browser or Windows settings"
+        }
+    } catch {
+        $report += "[?] DNS/DoH check failed"
+    }
+
+    # --- Hosts file: youtube entries ---
+    $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
+    if (Test-Path $hostsFile) {
+        $hostsContent = Get-Content $hostsFile -ErrorAction SilentlyContinue | Out-String
+        if ($hostsContent -match "youtube\.com|youtu\.be") {
+            $report += "[!] Hosts file has youtube.com/youtu.be entries - may interfere with YouTube"
+        } else {
+            $report += "[OK] Hosts file: no YouTube overrides"
+        }
+    }
+    $report += ""
+
+    # --- Conflicting services ---
+    $allServices = sc.exe query 2>&1 | Out-String
+
+    $checks = @(
+        @{Pattern="Killer";     Name="Killer Network"},
+        @{Pattern="SmartByte";  Name="SmartByte"},
+        @{Pattern="Adguard";    Name="AdGuard"},
+        @{Pattern="EPWD|TracSrvWrapper"; Name="Check Point"},
+        @{Pattern="Intel.*Connectivity|IntelCNS"; Name="Intel Connectivity"}
+    )
+    $foundConflicts = @()
+    foreach ($c in $checks) {
+        if ($allServices -match $c.Pattern) { $foundConflicts += $c.Name }
+    }
+    if ($foundConflicts.Count -gt 0) {
+        $report += "[X] Conflicting software found: $($foundConflicts -join ', ')"
+    } else {
+        $report += "[OK] No known conflicting software"
+    }
+
+    # VPN services
+    $vpnMatches = [regex]::Matches($allServices, "SERVICE_NAME:\s*(\S*VPN\S*)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($vpnMatches.Count -gt 0) {
+        $vpnNames = ($vpnMatches | ForEach-Object { $_.Groups[1].Value }) -join ", "
+        $report += "[!] VPN services detected: $vpnNames - disable VPN while using zapret"
+    } else {
+        $report += "[OK] No VPN services detected"
+    }
+
+    # Competing bypass services
+    $bypassServices = @("GoodbyeDPI","discordfix_zapret","winws1","winws2")
+    $foundBypass = $bypassServices | Where-Object { $allServices -match $_ }
+    if ($foundBypass) {
+        $report += "[X] Conflicting bypass services: $($foundBypass -join ', ')"
+    } else {
+        $report += "[OK] No competing bypass services"
+    }
     $report += ""
     $report += "=== END REPORT ==="
-    
+
+    # --- Build window ---
     $diagForm = New-Object System.Windows.Forms.Form
     $diagForm.Text = "Diagnostics Report"
-    $diagForm.Size = New-Object System.Drawing.Size(400, 380) 
+    $diagForm.Size = New-Object System.Drawing.Size(500, 580)
     $diagForm.StartPosition = "CenterScreen"
     $diagForm.BackColor = $colors.Midnight
     $diagForm.FormBorderStyle = "FixedDialog"
-    
+    $diagForm.MaximizeBox = $false
+
     $textBox = New-Object System.Windows.Forms.TextBox
     $textBox.Multiline = $true
     $textBox.ReadOnly = $true
     $textBox.ScrollBars = "Vertical"
     $textBox.Location = New-Object System.Drawing.Point(15, 15)
-    $textBox.Size = New-Object System.Drawing.Size(360, 250) 
+    $textBox.Size = New-Object System.Drawing.Size(456, 430)
     $textBox.Text = ($report -join "`r`n")
-    $textBox.Font = New-Object System.Drawing.Font("Consolas", 10)
+    $textBox.Font = New-Object System.Drawing.Font("Consolas", 9)
     $textBox.BackColor = $colors.DarkGray
     $textBox.ForeColor = $colors.Light
     $textBox.BorderStyle = "None"
     $diagForm.Controls.Add($textBox)
 
+    $btnClearCache = New-Object System.Windows.Forms.Button
+    $btnClearCache.Location = New-Object System.Drawing.Point(15, 460)
+    $btnClearCache.Size = New-Object System.Drawing.Size(200, 40)
+    $btnClearCache.Text = "Clear Discord Cache"
+    $btnClearCache.BackColor = $colors.DarkGray
+    $btnClearCache.ForeColor = $colors.Light
+    $btnClearCache.FlatStyle = "Flat"
+    $btnClearCache.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $btnClearCache.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnClearCache.Add_Click({ Clear-DiscordCache; $diagForm.Close() })
+    $diagForm.Controls.Add($btnClearCache)
+
     $closeBtn = New-Object System.Windows.Forms.Button
-    $closeBtn.Location = New-Object System.Drawing.Point(150, 280)
-    $closeBtn.Size = New-Object System.Drawing.Size(100, 40)
+    $closeBtn.Location = New-Object System.Drawing.Point(340, 460)
+    $closeBtn.Size = New-Object System.Drawing.Size(130, 40)
     $closeBtn.Text = "Close"
     $closeBtn.BackColor = $colors.Primary
     $closeBtn.ForeColor = $colors.White
@@ -825,7 +968,7 @@ function Run-Diagnostics {
     $closeBtn.Cursor = [System.Windows.Forms.Cursors]::Hand
     $closeBtn.Add_Click({ $diagForm.Close() })
     $diagForm.Controls.Add($closeBtn)
-    
+
     Update-StatusBar "Diagnostics complete" "Success"
     $diagForm.ShowDialog()
 }
@@ -881,77 +1024,10 @@ function Run-Tests {
     }
 }
 
-function Test-NetworkSettings {
-    Update-StatusBar "Checking network settings..." "Info"
-    
-    $report = @()
-    
-    try {
-        $dnsOutput = nslookup youtube.com 2>&1
-        if ($dnsOutput -match "server can't find") {
-            $report += "[WARNING] DNS resolution failed for youtube.com"
-        } else {
-            $report += "[OK] DNS resolution working"
-        }
-    } catch {
-        $report += "[ERROR] DNS test failed: $_"
-    }
-    
-    try {
-        $pingResult = Test-Connection -ComputerName "8.8.8.8" -Count 2 -Quiet -ErrorAction Stop
-        if ($pingResult) {
-            $report += "[OK] Ping to 8.8.8.8 successful"
-        } else {
-            $report += "[WARNING] Ping to 8.8.8.8 failed"
-        }
-    } catch {
-        $report += "[ERROR] Ping test failed: $_"
-    }
-    
-    $adapters = Get-NetAdapter -Physical | Where-Object {$_.Status -eq "Up"}
-    if ($adapters) {
-        $report += "[OK] Network adapters found: $($adapters.Count)"
-    } else {
-        $report += "[ERROR] No active network adapters found"
-    }
-    
-    $diagForm = New-Object System.Windows.Forms.Form
-    $diagForm.Text = "Network Diagnostics"
-    $diagForm.Size = New-Object System.Drawing.Size(500, 400)
-    $diagForm.StartPosition = "CenterScreen"
-    $diagForm.BackColor = $colors.Midnight
-    
-    $textBox = New-Object System.Windows.Forms.TextBox
-    $textBox.Multiline = $true
-    $textBox.ReadOnly = $true
-    $textBox.ScrollBars = "Vertical"
-    $textBox.Location = New-Object System.Drawing.Point(15, 15)
-    $textBox.Size = New-Object System.Drawing.Size(460, 300)
-    $textBox.Text = ($report -join "`r`n")
-    $textBox.Font = New-Object System.Drawing.Font("Consolas", 10)
-    $textBox.BackColor = $colors.DarkGray
-    $textBox.ForeColor = $colors.Light
-    $textBox.BorderStyle = "None"
-    $diagForm.Controls.Add($textBox)
-    
-    $closeBtn = New-Object System.Windows.Forms.Button
-    $closeBtn.Location = New-Object System.Drawing.Point(190, 325)
-    $closeBtn.Size = New-Object System.Drawing.Size(100, 35)
-    $closeBtn.Text = "Close"
-    $closeBtn.BackColor = $colors.Primary
-    $closeBtn.ForeColor = $colors.White
-    $closeBtn.FlatStyle = "Flat"
-    $closeBtn.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $closeBtn.Add_Click({ $diagForm.Close() })
-    $diagForm.Controls.Add($closeBtn)
-    
-    Update-StatusBar "Network check complete" "Success"
-    $diagForm.ShowDialog()
-}
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Zapret Service Manager v$LOCAL_VERSION"
-$form.Size = New-Object System.Drawing.Size(525, 650)
+$form.Size = New-Object System.Drawing.Size(525, 608)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
@@ -1195,20 +1271,10 @@ $btnTests.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnTests.Add_Click({ Run-Tests })
 $form.Controls.Add($btnTests)
 
-$btnNetworkTest = New-Object System.Windows.Forms.Button
-$btnNetworkTest.Location = New-Object System.Drawing.Point(15, 550)
-$btnNetworkTest.Size = New-Object System.Drawing.Size(475, 40)
-$btnNetworkTest.Text = "Network Diagnostics"
-$btnNetworkTest.BackColor = $colors.Primary
-$btnNetworkTest.ForeColor = $colors.White
-$btnNetworkTest.FlatStyle = "Flat"
-$btnNetworkTest.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$btnNetworkTest.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnNetworkTest.Add_Click({ Test-NetworkSettings })
-$form.Controls.Add($btnNetworkTest)
 
 Update-StatusDisplay
 Update-ServiceStatusBar
+Initialize-UserLists
 
 if ((Get-UpdateCheckStatus) -eq "enabled") {
     Check-Updates -AutoCheck $true
