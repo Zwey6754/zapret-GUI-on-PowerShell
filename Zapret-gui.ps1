@@ -11,7 +11,7 @@ if (-not $isAdmin) {
 Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);'
 [Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0) | Out-Null
 
-$LOCAL_VERSION = "1.9.7"
+$LOCAL_VERSION = "1.9.6"
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $colors = @{
@@ -166,6 +166,315 @@ function Initialize-UserLists {
             $defaults[$fileName] | Out-File -FilePath $filePath -Encoding UTF8 -NoNewline
         }
     }
+}
+
+function Open-UserListEditor {
+    param(
+        [string]$FilePath,
+        [string]$Title,
+        [string]$IsIP,
+        [string]$DefaultContent,
+        [string]$HintText,
+        [string]$Description
+    )
+
+    # Load raw content as-is - no filtering
+    $currentText = ""
+    if (Test-Path $FilePath) {
+        $currentText = (Get-Content $FilePath -Encoding UTF8 -Raw)
+        if ($null -eq $currentText) { $currentText = "" }
+        $currentText = $currentText.TrimEnd()
+    }
+
+    $script:editorModified = $false
+
+    # ---- Editor form ----
+    $ef = New-Object System.Windows.Forms.Form
+    $ef.Text = "User List Editor - $Title"
+    $ef.Size = New-Object System.Drawing.Size(560, 620)
+    $ef.StartPosition = "CenterScreen"
+    $ef.BackColor = $colors.Midnight
+    $ef.FormBorderStyle = "Sizable"
+    $ef.MinimumSize = New-Object System.Drawing.Size(420, 440)
+
+    # ---- Top description panel (2 lines) ----
+    $topPanel = New-Object System.Windows.Forms.Panel
+    $topPanel.Dock = "Top"
+    $topPanel.Height = 62
+    $topPanel.BackColor = [System.Drawing.Color]::FromArgb(30, 40, 54)
+    $ef.Controls.Add($topPanel)
+
+    $descLbl = New-Object System.Windows.Forms.Label
+    $descLbl.Location = New-Object System.Drawing.Point(12, 8)
+    $descLbl.Size = New-Object System.Drawing.Size(530, 22)
+    $descLbl.Text = $Description
+    $descLbl.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $descLbl.ForeColor = [System.Drawing.Color]::FromArgb(200, 210, 220)
+    $topPanel.Controls.Add($descLbl)
+
+    $hintLbl = New-Object System.Windows.Forms.Label
+    $hintLbl.Location = New-Object System.Drawing.Point(12, 33)
+    $hintLbl.Size = New-Object System.Drawing.Size(530, 20)
+    $hintLbl.Text = $HintText
+    $hintLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $hintLbl.ForeColor = [System.Drawing.Color]::FromArgb(130, 150, 170)
+    $topPanel.Controls.Add($hintLbl)
+
+    # ---- Bottom panel ----
+    $bottomPanel = New-Object System.Windows.Forms.Panel
+    $bottomPanel.Dock = "Bottom"
+    $bottomPanel.Height = 56
+    $bottomPanel.BackColor = [System.Drawing.Color]::FromArgb(36, 47, 61)
+    $ef.Controls.Add($bottomPanel)
+
+    # Save button
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Location = New-Object System.Drawing.Point(10, 10)
+    $btnSave.Size = New-Object System.Drawing.Size(120, 36)
+    $btnSave.Text = "Save  (Ctrl+S)"
+    $btnSave.BackColor = $colors.Success
+    $btnSave.ForeColor = $colors.White
+    $btnSave.FlatStyle = "Flat"
+    $btnSave.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $btnSave.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $bottomPanel.Controls.Add($btnSave)
+
+    # Reset to defaults button
+    $btnReset = New-Object System.Windows.Forms.Button
+    $btnReset.Location = New-Object System.Drawing.Point(140, 10)
+    $btnReset.Size = New-Object System.Drawing.Size(140, 36)
+    $btnReset.Text = "Reset to Default"
+    $btnReset.BackColor = $colors.DarkWarning
+    $btnReset.ForeColor = $colors.White
+    $btnReset.FlatStyle = "Flat"
+    $btnReset.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $btnReset.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $bottomPanel.Controls.Add($btnReset)
+
+    # Close button
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Location = New-Object System.Drawing.Point(290, 10)
+    $btnClose.Size = New-Object System.Drawing.Size(100, 36)
+    $btnClose.Text = "Close"
+    $btnClose.BackColor = $colors.Slate
+    $btnClose.ForeColor = $colors.White
+    $btnClose.FlatStyle = "Flat"
+    $btnClose.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $btnClose.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $bottomPanel.Controls.Add($btnClose)
+
+    # Status label
+    $statusLbl = New-Object System.Windows.Forms.Label
+    $statusLbl.Location = New-Object System.Drawing.Point(400, 16)
+    $statusLbl.Size = New-Object System.Drawing.Size(150, 24)
+    $statusLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $statusLbl.ForeColor = [System.Drawing.Color]::FromArgb(130, 150, 170)
+    $statusLbl.TextAlign = "MiddleLeft"
+    $lineCountInit = ($currentText -split "`n" | Where-Object { $_.Trim() -ne "" }).Count
+    $statusLbl.Text = "$lineCountInit lines"
+    $bottomPanel.Controls.Add($statusLbl)
+
+    # ---- Main text area ----
+    $rtb = New-Object System.Windows.Forms.RichTextBox
+    $rtb.Dock = "Fill"
+    $rtb.Text = $currentText
+    $rtb.Font = New-Object System.Drawing.Font("Consolas", 11)
+    $rtb.BackColor = [System.Drawing.Color]::FromArgb(40, 52, 68)
+    $rtb.ForeColor = [System.Drawing.Color]::FromArgb(220, 230, 240)
+    $rtb.BorderStyle = "None"
+    $rtb.ScrollBars = "Vertical"
+    $rtb.WordWrap = $false
+    $rtb.AcceptsTab = $false
+    $rtb.Padding = New-Object System.Windows.Forms.Padding(6)
+    $ef.Controls.Add($rtb)
+    $rtb.BringToFront()
+
+    # Track changes
+    $rtb.Add_TextChanged({
+        $script:editorModified = $true
+        $lc = ($rtb.Lines | Where-Object { $_.Trim() -ne "" }).Count
+        $statusLbl.Text = "$lc lines  *"
+        $statusLbl.ForeColor = $colors.Warning
+    })
+
+    # ---- Save logic ----
+    $doSave = {
+        $lines = $rtb.Lines | Where-Object { $_.Trim() -ne "" } | ForEach-Object { $_.Trim() }
+        if ($lines.Count -eq 0) {
+            $DefaultContent | Out-File -FilePath $FilePath -Encoding UTF8 -NoNewline
+            $rtb.Text = $DefaultContent
+            $count = 1
+        } else {
+            $lines | Out-File -FilePath $FilePath -Encoding UTF8
+            $count = $lines.Count
+        }
+        $script:editorModified = $false
+        $statusLbl.Text = "$count lines  [saved]"
+        $statusLbl.ForeColor = $colors.Success
+        Update-StatusBar "Saved $Title ($count lines)" "Success"
+    }
+
+    $btnSave.Add_Click({ & $doSave })
+
+    # Ctrl+S
+    $ef.KeyPreview = $true
+    $ef.Add_KeyDown({
+        if ($_.Control -and $_.KeyCode -eq [System.Windows.Forms.Keys]::S) { & $doSave }
+    })
+
+    # Reset to defaults
+    $btnReset.Add_Click({
+        $r = [System.Windows.Forms.MessageBox]::Show(
+            "Reset this list to its default value?`n`nAll your changes will be lost.",
+            "Reset to Default",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $rtb.Text = $DefaultContent
+            $script:editorModified = $true
+            $statusLbl.Text = "reset - save to apply"
+            $statusLbl.ForeColor = $colors.Warning
+        }
+    })
+
+    $btnClose.Add_Click({ $ef.Close() })
+
+    # Warn on unsaved close
+    $ef.Add_FormClosing({
+        if ($script:editorModified) {
+            $r = [System.Windows.Forms.MessageBox]::Show(
+                "You have unsaved changes.`n`nSave before closing?",
+                "Unsaved Changes",
+                [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
+                [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
+                & $doSave
+            } elseif ($r -eq [System.Windows.Forms.DialogResult]::Cancel) {
+                $_.Cancel = $true
+            }
+        }
+    })
+
+    $ef.ShowDialog() | Out-Null
+}
+
+function Open-UserListsEditor {
+    $listsPath = Join-Path $ScriptPath "lists"
+
+    # List definitions with user-friendly text
+    $fileMap = @(
+        @{
+            File    = "list-general-user.txt"
+            IsIP    = "false"
+            Default = "domain.example.abc"
+            Label   = "Add domains to bypass  (list-general-user.txt)"
+            Desc    = "Domains to bypass DPI - added to the main bypass list"
+            Hint    = "One domain per line, e.g.:  discord.com     youtube.com     example.ru"
+        },
+        @{
+            File    = "list-exclude-user.txt"
+            IsIP    = "false"
+            Default = "domain.example.abc"
+            Label   = "Exclude domains from bypass  (list-exclude-user.txt)"
+            Desc    = "Domains to exclude from bypass - these will NOT be processed by zapret"
+            Hint    = "One domain per line, e.g.:  ads.example.com     tracker.site"
+        },
+        @{
+            File    = "ipset-exclude-user.txt"
+            IsIP    = "true"
+            Default = "203.0.113.113/32"
+            Label   = "Exclude IP addresses from bypass  (ipset-exclude-user.txt)"
+            Desc    = "IP addresses / subnets to exclude from bypass (CIDR format)"
+            Hint    = "One IP or subnet per line, e.g.:  1.2.3.4/32     10.0.0.0/8     192.168.1.1/32"
+        }
+    )
+
+    # ---- Picker ----
+    $pf = New-Object System.Windows.Forms.Form
+    $pf.Text = "User Lists"
+    $pf.Size = New-Object System.Drawing.Size(480, 290)
+    $pf.StartPosition = "CenterScreen"
+    $pf.BackColor = $colors.Midnight
+    $pf.FormBorderStyle = "FixedDialog"
+    $pf.MaximizeBox = $false
+
+    $headerLbl = New-Object System.Windows.Forms.Label
+    $headerLbl.Location = New-Object System.Drawing.Point(15, 14)
+    $headerLbl.Size = New-Object System.Drawing.Size(440, 22)
+    $headerLbl.Text = "Which list do you want to edit?"
+    $headerLbl.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+    $headerLbl.ForeColor = $colors.Light
+    $pf.Controls.Add($headerLbl)
+
+    $subLbl = New-Object System.Windows.Forms.Label
+    $subLbl.Location = New-Object System.Drawing.Point(15, 38)
+    $subLbl.Size = New-Object System.Drawing.Size(440, 18)
+    $subLbl.Text = "Double-click or select and press Open"
+    $subLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $subLbl.ForeColor = [System.Drawing.Color]::FromArgb(120, 140, 160)
+    $pf.Controls.Add($subLbl)
+
+    $lb = New-Object System.Windows.Forms.ListBox
+    $lb.Location = New-Object System.Drawing.Point(15, 62)
+    $lb.Size = New-Object System.Drawing.Size(440, 120)
+    $lb.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $lb.BackColor = [System.Drawing.Color]::FromArgb(52, 73, 94)
+    $lb.ForeColor = [System.Drawing.Color]::FromArgb(220, 230, 240)
+    $lb.BorderStyle = "None"
+    $lb.ItemHeight = 26
+    foreach ($entry in $fileMap) { $lb.Items.Add($entry.Label) | Out-Null }
+    $lb.SelectedIndex = 0
+    $pf.Controls.Add($lb)
+
+    $btnOK = New-Object System.Windows.Forms.Button
+    $btnOK.Location = New-Object System.Drawing.Point(255, 200)
+    $btnOK.Size = New-Object System.Drawing.Size(95, 36)
+    $btnOK.Text = "Open"
+    $btnOK.BackColor = $colors.Primary
+    $btnOK.ForeColor = $colors.White
+    $btnOK.FlatStyle = "Flat"
+    $btnOK.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $btnOK.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnOK.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $pf.Controls.Add($btnOK)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Location = New-Object System.Drawing.Point(360, 200)
+    $btnCancel.Size = New-Object System.Drawing.Size(95, 36)
+    $btnCancel.Text = "Cancel"
+    $btnCancel.BackColor = $colors.Slate
+    $btnCancel.ForeColor = $colors.White
+    $btnCancel.FlatStyle = "Flat"
+    $btnCancel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $btnCancel.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $pf.Controls.Add($btnCancel)
+
+    $pf.AcceptButton = $btnOK
+    $pf.CancelButton = $btnCancel
+    $lb.Add_DoubleClick({ $pf.DialogResult = [System.Windows.Forms.DialogResult]::OK; $pf.Close() })
+
+    $result = $pf.ShowDialog()
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return }
+
+    $idx = $lb.SelectedIndex
+    if ($idx -lt 0) { return }
+    $def      = $fileMap[$idx]
+    $filePath = Join-Path $listsPath $def.File
+
+    # Ensure file exists with default content if missing
+    if (-not (Test-Path $listsPath)) { New-Item -ItemType Directory -Path $listsPath -Force | Out-Null }
+    if (-not (Test-Path $filePath)) {
+        $def.Default | Out-File -FilePath $filePath -Encoding UTF8 -NoNewline
+    }
+
+    Open-UserListEditor `
+        -FilePath        $filePath `
+        -Title           $def.File `
+        -IsIP            $def.IsIP `
+        -DefaultContent  $def.Default `
+        -HintText        $def.Hint `
+        -Description     $def.Desc
 }
 
 function Update-StatusDisplay {
@@ -691,44 +1000,150 @@ function Update-HostsFile {
 
 function Check-Updates {
     param([bool]$AutoCheck = $false)
-    
+
     if (-not $AutoCheck) {
         Update-StatusBar "Checking for updates..." "Info"
     }
-    
-    $versionUrl = "https://raw.githubusercontent.com/Zwey6754/zapret-GUI-on-PowerShell/main/.service/version.txt"
-    $downloadUrl = "https://github.com/Zwey6754/zapret-GUI-on-PowerShell/releases/latest"
-    
+
+    $versionUrl  = "https://raw.githubusercontent.com/Zwey6754/zapret-GUI-on-PowerShell/main/.service/version.txt"
+    $apiUrl      = "https://api.github.com/repos/Zwey6754/zapret-GUI-on-PowerShell/releases/latest"
+    $updaterPath = Join-Path $ScriptPath "utils\updater.ps1"
+
     try {
         $githubVersion = (Invoke-WebRequest -Uri $versionUrl -UseBasicParsing -TimeoutSec 5).Content.Trim()
-        
+
         if ($LOCAL_VERSION -eq $githubVersion) {
             if (-not $AutoCheck) {
-                Update-StatusBar "Latest version: $LOCAL_VERSION" "Success"
+                Update-StatusBar "Latest version installed: $LOCAL_VERSION" "Success"
                 [System.Windows.Forms.MessageBox]::Show(
                     "You have the latest version!`n`nCurrent: $LOCAL_VERSION",
                     "Up to Date",
                     [System.Windows.Forms.MessageBoxButtons]::OK,
-                    [System.Windows.Forms.MessageBoxIcon]::Information
-                )
+                    [System.Windows.Forms.MessageBoxIcon]::Information)
             }
-        } else {
-            Update-StatusBar "Update available: $githubVersion" "Warning"
-            
-            $result = [System.Windows.Forms.MessageBox]::Show(
-                "New version available!`n`nCurrent: $LOCAL_VERSION`nLatest: $githubVersion`n`nOpen download page?",
-                "Update Available",
-                [System.Windows.Forms.MessageBoxButtons]::YesNo,
-                [System.Windows.Forms.MessageBoxIcon]::Question
-            )
-            
-            if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
-                Start-Process $downloadUrl
-                Update-StatusBar "Download page opened" "Success"
-            } else {
-                Update-StatusBar "Update cancelled" "Info"
-            }
+            return
         }
+
+        Update-StatusBar "Update available: $githubVersion" "Warning"
+
+        # --- Choice dialog ---
+        $choiceForm = New-Object System.Windows.Forms.Form
+        $choiceForm.Text = "Update Available"
+        $choiceForm.Size = New-Object System.Drawing.Size(420, 250)
+        $choiceForm.StartPosition = "CenterScreen"
+        $choiceForm.BackColor = $colors.Midnight
+        $choiceForm.FormBorderStyle = "FixedDialog"
+        $choiceForm.MaximizeBox = $false
+
+        $msgLbl = New-Object System.Windows.Forms.Label
+        $msgLbl.Location = New-Object System.Drawing.Point(15, 15)
+        $msgLbl.Size = New-Object System.Drawing.Size(380, 50)
+        $msgLbl.Text = "New version available!`n`nCurrent: $LOCAL_VERSION      Latest: $githubVersion"
+        $msgLbl.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $msgLbl.ForeColor = $colors.Light
+        $choiceForm.Controls.Add($msgLbl)
+
+        $sepLbl = New-Object System.Windows.Forms.Label
+        $sepLbl.Location = New-Object System.Drawing.Point(15, 68)
+        $sepLbl.Size = New-Object System.Drawing.Size(380, 18)
+        $sepLbl.Text = "How do you want to update?"
+        $sepLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $sepLbl.ForeColor = [System.Drawing.Color]::FromArgb(130, 150, 170)
+        $choiceForm.Controls.Add($sepLbl)
+
+        # Auto-update button
+        $btnAuto = New-Object System.Windows.Forms.Button
+        $btnAuto.Location = New-Object System.Drawing.Point(15, 96)
+        $btnAuto.Size = New-Object System.Drawing.Size(375, 44)
+        $btnAuto.Text = "Auto-install  (download and replace files)"
+        $btnAuto.BackColor = $colors.Success
+        $btnAuto.ForeColor = $colors.White
+        $btnAuto.FlatStyle = "Flat"
+        $btnAuto.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $btnAuto.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $btnAuto.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+        $choiceForm.Controls.Add($btnAuto)
+
+        # Open page button
+        $btnPage = New-Object System.Windows.Forms.Button
+        $btnPage.Location = New-Object System.Drawing.Point(15, 150)
+        $btnPage.Size = New-Object System.Drawing.Size(375, 44)
+        $btnPage.Text = "Open release page  (download manually in browser)"
+        $btnPage.BackColor = $colors.Primary
+        $btnPage.ForeColor = $colors.White
+        $btnPage.FlatStyle = "Flat"
+        $btnPage.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $btnPage.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $btnPage.DialogResult = [System.Windows.Forms.DialogResult]::No
+        $choiceForm.Controls.Add($btnPage)
+
+        # Cancel on X
+        $choiceForm.CancelButton = $null
+        $script:updateChoice = "cancel"
+        $btnAuto.Add_Click({ $script:updateChoice = "auto";   $choiceForm.Close() })
+        $btnPage.Add_Click({ $script:updateChoice = "page";   $choiceForm.Close() })
+        $choiceForm.Add_FormClosing({ if ($script:updateChoice -eq "cancel") {} })
+
+        $choiceForm.ShowDialog() | Out-Null
+
+        if ($script:updateChoice -eq "cancel") {
+            Update-StatusBar "Update postponed" "Info"
+            return
+        }
+
+        if ($script:updateChoice -eq "page") {
+            $releasePageUrl = "https://github.com/Zwey6754/zapret-GUI-on-PowerShell/releases/latest"
+            Start-Process $releasePageUrl
+            Update-StatusBar "Release page opened in browser" "Info"
+            return
+        }
+
+        # --- Auto-install path ---
+        Update-StatusBar "Fetching release info..." "Info"
+        try {
+            $releaseInfo = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 10
+      $zipAsset = $releaseInfo.assets | Where-Object { $_.name -like "*.zip" } | Select-Object -First 1
+if ($zipAsset) {
+    $zipUrl = $zipAsset.browser_download_url
+} else {
+    # fallback на zipball если в релизе нет .zip asset
+    $zipUrl = $releaseInfo.zipball_url
+	}
+}
+catch {
+            Update-StatusBar "Failed to get release info" "Error"
+            [System.Windows.Forms.MessageBox]::Show(
+                "Could not fetch release info from GitHub.`nCheck your internet connection.",
+                "Update Failed",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error)
+            return
+        }
+
+        if (-not (Test-Path $updaterPath)) {
+            Update-StatusBar "updater.ps1 not found in utils\" "Error"
+            [System.Windows.Forms.MessageBox]::Show(
+                "utils\updater.ps1 not found.`nMake sure it is present in the utils folder.",
+                "Updater Missing",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error)
+            return
+        }
+
+        Update-StatusBar "Launching updater..." "Info"
+        $guiPath = $MyInvocation.ScriptName
+        if (-not $guiPath) { $guiPath = Join-Path $ScriptPath "zapret-gui.ps1" }
+
+        Start-Process powershell.exe -ArgumentList (
+            "-NoProfile -ExecutionPolicy Bypass -File `"$updaterPath`"",
+            "-ScriptPath `"$ScriptPath`"",
+            "-ZipUrl `"$zipUrl`"",
+            "-GuiPath `"$guiPath`""
+        ) -Verb RunAs
+
+        # Close this GUI so updater can replace files freely
+        $form.Close()
+
     } catch {
         if (-not $AutoCheck) {
             Update-StatusBar "Check failed: $($_.Exception.Message)" "Error"
@@ -1027,7 +1442,7 @@ function Run-Tests {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Zapret Service Manager v$LOCAL_VERSION"
-$form.Size = New-Object System.Drawing.Size(525, 608)
+$form.Size = New-Object System.Drawing.Size(525, 668)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
@@ -1195,8 +1610,20 @@ $btnAutoUpdate.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnAutoUpdate.Add_Click({ Toggle-AutoUpdate })
 $form.Controls.Add($btnAutoUpdate)
 
+$btnUserLists = New-Object System.Windows.Forms.Button
+$btnUserLists.Location = New-Object System.Drawing.Point(15, 380)
+$btnUserLists.Size = New-Object System.Drawing.Size(475, 40)
+$btnUserLists.Text = "User Lists (domains / IPs)"
+$btnUserLists.BackColor = $colors.DarkGray
+$btnUserLists.ForeColor = $colors.Light
+$btnUserLists.FlatStyle = "Flat"
+$btnUserLists.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnUserLists.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnUserLists.Add_Click({ Open-UserListsEditor })
+$form.Controls.Add($btnUserLists)
+
 $lblUpdates = New-Object System.Windows.Forms.Label
-$lblUpdates.Location = New-Object System.Drawing.Point(15, 385)
+$lblUpdates.Location = New-Object System.Drawing.Point(15, 440)
 $lblUpdates.Size = New-Object System.Drawing.Size(480, 25)
 $lblUpdates.Text = "UPDATES"
 $lblUpdates.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
@@ -1204,7 +1631,7 @@ $lblUpdates.ForeColor = $colors.Light
 $form.Controls.Add($lblUpdates)
 
 $btnUpdateIPSet = New-Object System.Windows.Forms.Button
-$btnUpdateIPSet.Location = New-Object System.Drawing.Point(15, 415)
+$btnUpdateIPSet.Location = New-Object System.Drawing.Point(15, 470)
 $btnUpdateIPSet.Size = New-Object System.Drawing.Size(150, 40)
 $btnUpdateIPSet.Text = "Update IPSet"
 $btnUpdateIPSet.BackColor = $colors.DarkGray
@@ -1216,7 +1643,7 @@ $btnUpdateIPSet.Add_Click({ Update-IPSetList })
 $form.Controls.Add($btnUpdateIPSet)
 
 $btnUpdateHosts = New-Object System.Windows.Forms.Button
-$btnUpdateHosts.Location = New-Object System.Drawing.Point(177, 415)
+$btnUpdateHosts.Location = New-Object System.Drawing.Point(177, 470)
 $btnUpdateHosts.Size = New-Object System.Drawing.Size(150, 40)
 $btnUpdateHosts.Text = "Update Hosts"
 $btnUpdateHosts.BackColor = $colors.DarkGray
@@ -1228,7 +1655,7 @@ $btnUpdateHosts.Add_Click({ Update-HostsFile })
 $form.Controls.Add($btnUpdateHosts)
 
 $btnCheckUpdates = New-Object System.Windows.Forms.Button
-$btnCheckUpdates.Location = New-Object System.Drawing.Point(340, 415)
+$btnCheckUpdates.Location = New-Object System.Drawing.Point(340, 470)
 $btnCheckUpdates.Size = New-Object System.Drawing.Size(150, 40)
 $btnCheckUpdates.Text = "Check Updates"
 $btnCheckUpdates.BackColor = $colors.DarkGray
@@ -1240,7 +1667,7 @@ $btnCheckUpdates.Add_Click({ Check-Updates })
 $form.Controls.Add($btnCheckUpdates)
 
 $lblTools = New-Object System.Windows.Forms.Label
-$lblTools.Location = New-Object System.Drawing.Point(15, 470)
+$lblTools.Location = New-Object System.Drawing.Point(15, 530)
 $lblTools.Size = New-Object System.Drawing.Size(480, 25)
 $lblTools.Text = "TOOLS"
 $lblTools.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
@@ -1248,7 +1675,7 @@ $lblTools.ForeColor = $colors.Light
 $form.Controls.Add($lblTools)
 
 $btnDiagnostics = New-Object System.Windows.Forms.Button
-$btnDiagnostics.Location = New-Object System.Drawing.Point(15, 500)
+$btnDiagnostics.Location = New-Object System.Drawing.Point(15, 560)
 $btnDiagnostics.Size = New-Object System.Drawing.Size(230, 40)
 $btnDiagnostics.Text = "Run Diagnostics"
 $btnDiagnostics.BackColor = $colors.Warning
@@ -1260,7 +1687,7 @@ $btnDiagnostics.Add_Click({ Run-Diagnostics })
 $form.Controls.Add($btnDiagnostics)
 
 $btnTests = New-Object System.Windows.Forms.Button
-$btnTests.Location = New-Object System.Drawing.Point(260, 500)
+$btnTests.Location = New-Object System.Drawing.Point(260, 560)
 $btnTests.Size = New-Object System.Drawing.Size(230, 40)
 $btnTests.Text = "Run Tests"
 $btnTests.BackColor = $colors.DarkWarning
