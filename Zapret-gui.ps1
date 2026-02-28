@@ -1202,6 +1202,7 @@ function Show-ServiceStatus {
 }
 
 function Run-Diagnostics {
+    Show-Progress
     Update-StatusBar "Running diagnostics..." "Info"
 
     $report = @()
@@ -1251,8 +1252,13 @@ function Run-Diagnostics {
     }
 
     # --- TCP Timestamps ---
-    $tcpTs = netsh interface tcp show global 2>&1 | Out-String
-    if ($tcpTs -match "timestamps.*enabled" -or $tcpTs -match "enabled.*timestamps") {
+    $tcpTimestampReg = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" `
+        -Name "Tcp1323Opts" -ErrorAction SilentlyContinue)."Tcp1323Opts"
+    $tcpTsNetsh = netsh interface tcp show global 2>&1 | Out-String
+    $tcpTsEnabled = ($tcpTimestampReg -band 2) -eq 2 -or
+                    $tcpTsNetsh -match "(?i)timestamp[s]?\s*[:\-]\s*enabled" -or
+                    $tcpTsNetsh -match "(?i)enabled\s+.*timestamp"
+    if ($tcpTsEnabled) {
         $report += "[OK] TCP Timestamps enabled"
     } else {
         $report += "[!] TCP Timestamps disabled - enabling..."
@@ -1298,19 +1304,24 @@ function Run-Diagnostics {
     }
     $report += ""
 
-    # --- Conflicting services ---
-    $allServices = sc.exe query 2>&1 | Out-String
+    # --- Conflicting services & VPN ---
+    $allServiceObjects = Get-Service -ErrorAction SilentlyContinue
 
-    $checks = @(
-        @{Pattern="Killer";     Name="Killer Network"},
-        @{Pattern="SmartByte";  Name="SmartByte"},
-        @{Pattern="Adguard";    Name="AdGuard"},
-        @{Pattern="EPWD|TracSrvWrapper"; Name="Check Point"},
-        @{Pattern="Intel.*Connectivity|IntelCNS"; Name="Intel Connectivity"}
+    $conflictChecks = @(
+        @{Pattern="killer";                     Name="Killer Network"},
+        @{Pattern="smartbyte";                  Name="SmartByte"},
+        @{Pattern="adguard";                    Name="AdGuard"},
+        @{Pattern="epwd|tracssrvwrapper";        Name="Check Point VPN"},
+        @{Pattern="intelcns|intel.*connect";    Name="Intel Connectivity"}
     )
     $foundConflicts = @()
-    foreach ($c in $checks) {
-        if ($allServices -match $c.Pattern) { $foundConflicts += $c.Name }
+    foreach ($svc in $allServiceObjects) {
+        $combined = "$($svc.Name) $($svc.DisplayName)".ToLower()
+        foreach ($c in $conflictChecks) {
+            if ($combined -match $c.Pattern -and $foundConflicts -notcontains $c.Name) {
+                $foundConflicts += $c.Name
+            }
+        }
     }
     if ($foundConflicts.Count -gt 0) {
         $report += "[X] Conflicting software found: $($foundConflicts -join ', ')"
@@ -1318,20 +1329,36 @@ function Run-Diagnostics {
         $report += "[OK] No known conflicting software"
     }
 
-    # VPN services
-    $vpnMatches = [regex]::Matches($allServices, "SERVICE_NAME:\s*(\S*VPN\S*)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($vpnMatches.Count -gt 0) {
-        $vpnNames = ($vpnMatches | ForEach-Object { $_.Groups[1].Value }) -join ", "
-        $report += "[!] VPN services detected: $vpnNames - disable VPN while using zapret"
+       # VPN services — check BOTH service name and display name
+    $vpnKeywords = @(
+        "vpn", "wireguard", "openvpn", "nordvpn", "expressvpn", "windscribe",
+        "mullvad", "protonvpn", "surfshark", "privateinternetaccess",
+        "ipvanish", "cyberghost", "hotspotshield", "tunnelbear", "hideme",
+        "hide\.me", "torguard", "astrill", "purevpn", "zenmate""nekoray", "throne"
+    )
+    $foundVpn = @()
+    foreach ($svc in $allServiceObjects) {
+        $combined = "$($svc.Name)|$($svc.DisplayName)".ToLower()
+        foreach ($kw in $vpnKeywords) {
+            if ($combined -match $kw) {
+                $label = "$($svc.DisplayName) [$($svc.Status)]"
+                if ($foundVpn -notcontains $label) { $foundVpn += $label }
+                break
+            }
+        }
+    }
+    if ($foundVpn.Count -gt 0) {
+        $report += "[!] VPN services detected: $($foundVpn -join ', ')"
+        $report += "    -> disable VPN while using zapret for best results"
     } else {
         $report += "[OK] No VPN services detected"
     }
 
     # Competing bypass services
-    $bypassServices = @("GoodbyeDPI","discordfix_zapret","winws1","winws2")
-    $foundBypass = $bypassServices | Where-Object { $allServices -match $_ }
+    $bypassServiceNames = @("GoodbyeDPI","discordfix_zapret","winws1","winws2")
+    $foundBypass = $allServiceObjects | Where-Object { $bypassServiceNames -contains $_.Name }
     if ($foundBypass) {
-        $report += "[X] Conflicting bypass services: $($foundBypass -join ', ')"
+        $report += "[X] Conflicting bypass services: $($foundBypass.Name -join ', ')"
     } else {
         $report += "[OK] No competing bypass services"
     }
@@ -1341,28 +1368,44 @@ function Run-Diagnostics {
     # --- Build window ---
     $diagForm = New-Object System.Windows.Forms.Form
     $diagForm.Text = "Diagnostics Report"
-    $diagForm.Size = New-Object System.Drawing.Size(500, 580)
+    $diagForm.Size = New-Object System.Drawing.Size(500, 560)
     $diagForm.StartPosition = "CenterScreen"
     $diagForm.BackColor = $colors.Midnight
     $diagForm.FormBorderStyle = "FixedDialog"
     $diagForm.MaximizeBox = $false
 
-    $textBox = New-Object System.Windows.Forms.TextBox
-    $textBox.Multiline = $true
+    $textBox = New-Object System.Windows.Forms.RichTextBox
     $textBox.ReadOnly = $true
     $textBox.ScrollBars = "Vertical"
-    $textBox.Location = New-Object System.Drawing.Point(15, 15)
-    $textBox.Size = New-Object System.Drawing.Size(456, 430)
-    $textBox.Text = ($report -join "`r`n")
+    $textBox.Location = New-Object System.Drawing.Point(12, 12)
+    $textBox.Size = New-Object System.Drawing.Size(462, 448)
     $textBox.Font = New-Object System.Drawing.Font("Consolas", 9)
     $textBox.BackColor = $colors.DarkGray
     $textBox.ForeColor = $colors.Light
     $textBox.BorderStyle = "None"
+    $textBox.WordWrap = $true
     $diagForm.Controls.Add($textBox)
 
+    # Colorize each line by prefix
+    foreach ($line in $report) {
+        $col = switch -Regex ($line) {
+            "^\[OK\]"   { $colors.Success }
+            "^\[X\]"    { $colors.Danger  }
+            "^\[!\]"    { $colors.Warning }
+            "^\[\?\]"   { $colors.Primary }
+            "^\s+"      { [System.Drawing.Color]::FromArgb(120, 140, 160) }
+            "^==="      { [System.Drawing.Color]::FromArgb(150, 170, 190) }
+            default     { $colors.Light   }
+        }
+        $textBox.SelectionStart  = $textBox.TextLength
+        $textBox.SelectionLength = 0
+        $textBox.SelectionColor  = $col
+        $textBox.AppendText("$line`n")
+    }
+
     $btnClearCache = New-Object System.Windows.Forms.Button
-    $btnClearCache.Location = New-Object System.Drawing.Point(15, 460)
-    $btnClearCache.Size = New-Object System.Drawing.Size(200, 40)
+    $btnClearCache.Location = New-Object System.Drawing.Point(12, 472)
+    $btnClearCache.Size = New-Object System.Drawing.Size(200, 36)
     $btnClearCache.Text = "Clear Discord Cache"
     $btnClearCache.BackColor = $colors.DarkGray
     $btnClearCache.ForeColor = $colors.Light
@@ -1373,8 +1416,8 @@ function Run-Diagnostics {
     $diagForm.Controls.Add($btnClearCache)
 
     $closeBtn = New-Object System.Windows.Forms.Button
-    $closeBtn.Location = New-Object System.Drawing.Point(340, 460)
-    $closeBtn.Size = New-Object System.Drawing.Size(130, 40)
+    $closeBtn.Location = New-Object System.Drawing.Point(344, 472)
+    $closeBtn.Size = New-Object System.Drawing.Size(130, 36)
     $closeBtn.Text = "Close"
     $closeBtn.BackColor = $colors.Primary
     $closeBtn.ForeColor = $colors.White
@@ -1384,6 +1427,7 @@ function Run-Diagnostics {
     $closeBtn.Add_Click({ $diagForm.Close() })
     $diagForm.Controls.Add($closeBtn)
 
+    Hide-Progress
     Update-StatusBar "Diagnostics complete" "Success"
     $diagForm.ShowDialog()
 }
