@@ -11,7 +11,7 @@ if (-not $isAdmin) {
 Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);'
 [Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0) | Out-Null
 
-$LOCAL_VERSION = "1.9.6"
+$LOCAL_VERSION = "1.9.7b"
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $colors = @{
@@ -1141,7 +1141,6 @@ catch {
             "-GuiPath `"$guiPath`""
         ) -Verb RunAs
 
-        # Close this GUI so updater can replace files freely
         $form.Close()
 
     } catch {
@@ -1329,7 +1328,7 @@ function Run-Diagnostics {
         $report += "[OK] No known conflicting software"
     }
 
-       # VPN services — check BOTH service name and display name
+    # VPN services — check BOTH service name and display name
     $vpnKeywords = @(
         "vpn", "wireguard", "openvpn", "nordvpn", "expressvpn", "windscribe",
         "mullvad", "protonvpn", "surfshark", "privateinternetaccess",
@@ -1383,7 +1382,7 @@ function Run-Diagnostics {
     $textBox.BackColor = $colors.DarkGray
     $textBox.ForeColor = $colors.Light
     $textBox.BorderStyle = "None"
-    $textBox.WordWrap = $true
+    $textBox.WordWrap = $true 
     $diagForm.Controls.Add($textBox)
 
     # Colorize each line by prefix
