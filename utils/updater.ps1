@@ -4,12 +4,6 @@
     [string]$GuiPath
 )
 
-# -------------------------------------------------------
-#  Zapret GUI - Auto Updater
-#  Launched by zapret-gui.ps1 when user confirms update.
-#  Runs as a separate elevated process.
-# -------------------------------------------------------
-
 $ErrorActionPreference = "Stop"
 
 function Write-Step {
@@ -32,8 +26,6 @@ try {
     Write-Step "=== Zapret GUI Updater ===" "White"
     Write-Step ""
     Write-Step "[1/5] Downloading update..."
-
-    # GitHub redirects zipball, so follow redirects
     $webClient = New-Object System.Net.WebClient
     $webClient.Headers.Add("User-Agent", "zapret-gui-updater")
     $webClient.DownloadFile($ZipUrl, $zipFile)
@@ -56,7 +48,6 @@ if ($topLevelFiles.Count -eq 0 -and $topLevelDirs.Count -eq 1) {
     Write-Step "      Extracted to: $sourceDir" "DarkGray"
 
     Write-Step "[3/5] Backing up user lists..."
-    # Save user list files so they survive the update
     $userListFiles = @(
         "lists\list-general-user.txt",
         "lists\list-exclude-user.txt",
@@ -72,8 +63,6 @@ if ($topLevelFiles.Count -eq 0 -and $topLevelDirs.Count -eq 1) {
     }
 
     Write-Step "[4/5] Copying new files..."
-    # Copy all files from extracted folder over current installation
-    # Exclude user-specific files and utils folder entirely
     $excludeDirs  = @("utils")
     $excludeFiles = @("list-general-user.txt", "list-exclude-user.txt", "ipset-exclude-user.txt")
 
@@ -108,7 +97,6 @@ if ($topLevelFiles.Count -eq 0 -and $topLevelDirs.Count -eq 1) {
     }
     Write-Step "      Files copied." "DarkGray"
 
-    # Restore user lists
     if ($backups.Count -gt 0) {
         Write-Step "      Restoring user lists..." "DarkGray"
         foreach ($rel in $backups.Keys) {

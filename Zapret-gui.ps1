@@ -188,7 +188,7 @@ function Open-UserListEditor {
 
     $script:editorModified = $false
 
-    # ---- Editor form ----
+    # Editor form 
     $ef = New-Object System.Windows.Forms.Form
     $ef.Text = "User List Editor - $Title"
     $ef.Size = New-Object System.Drawing.Size(560, 620)
@@ -197,7 +197,7 @@ function Open-UserListEditor {
     $ef.FormBorderStyle = "Sizable"
     $ef.MinimumSize = New-Object System.Drawing.Size(420, 440)
 
-    # ---- Top description panel (2 lines) ----
+    # Top description panel (2 lines)
     $topPanel = New-Object System.Windows.Forms.Panel
     $topPanel.Dock = "Top"
     $topPanel.Height = 62
@@ -220,7 +220,7 @@ function Open-UserListEditor {
     $hintLbl.ForeColor = [System.Drawing.Color]::FromArgb(130, 150, 170)
     $topPanel.Controls.Add($hintLbl)
 
-    # ---- Bottom panel ----
+    # Bottom panel 
     $bottomPanel = New-Object System.Windows.Forms.Panel
     $bottomPanel.Dock = "Bottom"
     $bottomPanel.Height = 56
@@ -274,7 +274,7 @@ function Open-UserListEditor {
     $statusLbl.Text = "$lineCountInit lines"
     $bottomPanel.Controls.Add($statusLbl)
 
-    # ---- Main text area ----
+    # Main text area 
     $rtb = New-Object System.Windows.Forms.RichTextBox
     $rtb.Dock = "Fill"
     $rtb.Text = $currentText
@@ -297,7 +297,7 @@ function Open-UserListEditor {
         $statusLbl.ForeColor = $colors.Warning
     })
 
-    # ---- Save logic ----
+    # Save logic
     $doSave = {
         $lines = $rtb.Lines | Where-Object { $_.Trim() -ne "" } | ForEach-Object { $_.Trim() }
         if ($lines.Count -eq 0) {
@@ -389,7 +389,7 @@ function Open-UserListsEditor {
         }
     )
 
-    # ---- Picker ----
+    # Picker
     $pf = New-Object System.Windows.Forms.Form
     $pf.Text = "User Lists"
     $pf.Size = New-Object System.Drawing.Size(480, 290)
@@ -1098,7 +1098,7 @@ function Check-Updates {
             return
         }
 
-        # --- Auto-install path ---
+        # Auto-install path 
         Update-StatusBar "Fetching release info..." "Info"
         try {
             $releaseInfo = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 10
@@ -1209,7 +1209,7 @@ function Run-Diagnostics {
     $report += "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     $report += ""
 
-    # --- Service ---
+    # Service
     $serviceInfo = Get-ServiceInfo
     if ($serviceInfo.Installed) {
         $report += "[OK] Service installed: $($serviceInfo.Config)"
@@ -1223,7 +1223,7 @@ function Run-Diagnostics {
     $report += "[$(if($winwsProc){'OK'}else{'X'})] winws.exe: $(if($winwsProc){"Running ($($winwsProc.Count))"}else{'Not running'})"
     $report += ""
 
-    # --- WinDivert64.sys ---
+    # WinDivert64.sys 
     $binPath = Join-Path $ScriptPath "bin"
     if (Test-Path "$binPath\*.sys") {
         $report += "[OK] WinDivert64.sys found"
@@ -1231,7 +1231,7 @@ function Run-Diagnostics {
         $report += "[X] WinDivert64.sys NOT found"
     }
 
-    # WinDivert conflict (active without winws)
+    # WinDivert conflict
     $wdStatus = (sc.exe query WinDivert 2>&1 | Out-String)
     if ($wdStatus -match "RUNNING|STOP_PENDING") {
         if (-not $winwsProc) {
@@ -1242,7 +1242,7 @@ function Run-Diagnostics {
     }
     $report += ""
 
-    # --- Base Filtering Engine ---
+    # Base Filtering Engine 
     $bfe = Get-Service -Name BFE -ErrorAction SilentlyContinue
     if ($bfe -and $bfe.Status -eq "Running") {
         $report += "[OK] Base Filtering Engine running"
@@ -1250,7 +1250,7 @@ function Run-Diagnostics {
         $report += "[X] Base Filtering Engine NOT running (required for zapret)"
     }
 
-    # --- TCP Timestamps ---
+    # TCP Timestamps 
     $tcpTimestampReg = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" `
         -Name "Tcp1323Opts" -ErrorAction SilentlyContinue)."Tcp1323Opts"
     $tcpTsNetsh = netsh interface tcp show global 2>&1 | Out-String
@@ -1266,7 +1266,7 @@ function Run-Diagnostics {
     }
     $report += ""
 
-    # --- Proxy ---
+    # Proxy 
     $proxyEnabled = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).ProxyEnable
     if ($proxyEnabled -eq 1) {
         $proxyServer = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).ProxyServer
@@ -1276,7 +1276,7 @@ function Run-Diagnostics {
         $report += "[OK] No system proxy"
     }
 
-    # --- DNS / DoH ---
+    # DNS / DoH 
     try {
         $dohCount = (Get-ChildItem -Recurse -Path "HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\" -ErrorAction SilentlyContinue |
             Get-ItemProperty -ErrorAction SilentlyContinue |
@@ -1291,7 +1291,7 @@ function Run-Diagnostics {
         $report += "[?] DNS/DoH check failed"
     }
 
-    # --- Hosts file: youtube entries ---
+    # Hosts file: youtube entries 
     $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
     if (Test-Path $hostsFile) {
         $hostsContent = Get-Content $hostsFile -ErrorAction SilentlyContinue | Out-String
@@ -1303,7 +1303,7 @@ function Run-Diagnostics {
     }
     $report += ""
 
-    # --- Conflicting services & VPN ---
+    # Conflicting services & VPN 
     $allServiceObjects = Get-Service -ErrorAction SilentlyContinue
 
     $conflictChecks = @(
@@ -1328,7 +1328,7 @@ function Run-Diagnostics {
         $report += "[OK] No known conflicting software"
     }
 
-    # VPN services — check BOTH service name and display name
+    # VPN services 
     $vpnKeywords = @(
         "vpn", "wireguard", "openvpn", "nordvpn", "expressvpn", "windscribe",
         "mullvad", "protonvpn", "surfshark", "privateinternetaccess",
@@ -1364,7 +1364,7 @@ function Run-Diagnostics {
     $report += ""
     $report += "=== END REPORT ==="
 
-    # --- Build window ---
+    #  Build window 
     $diagForm = New-Object System.Windows.Forms.Form
     $diagForm.Text = "Diagnostics Report"
     $diagForm.Size = New-Object System.Drawing.Size(500, 560)
@@ -1481,7 +1481,6 @@ function Run-Tests {
         Update-StatusBar "Failed to run tests: $_" "Error"
     }
 }
-
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Zapret Service Manager v$LOCAL_VERSION"
@@ -1740,7 +1739,6 @@ $btnTests.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.
 $btnTests.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnTests.Add_Click({ Run-Tests })
 $form.Controls.Add($btnTests)
-
 
 Update-StatusDisplay
 Update-ServiceStatusBar
