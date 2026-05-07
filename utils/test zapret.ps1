@@ -1,12 +1,20 @@
+#Requires -Version 5.0
+# test_zapret_gui.ps1  --  place in utils\ folder next to test_zapret.ps1
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# ---------------------------------------------------------------------------
+# Auto-elevation
+# ---------------------------------------------------------------------------
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`"" -Verb RunAs
     exit
 }
 
+# ---------------------------------------------------------------------------
 # Hide console window
+# ---------------------------------------------------------------------------
 if (-not ([System.Management.Automation.PSTypeName]'ZapNative').Type) {
     Add-Type -Name ZapNative -Namespace '' -MemberDefinition @'
         [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
@@ -15,7 +23,9 @@ if (-not ([System.Management.Automation.PSTypeName]'ZapNative').Type) {
 }
 try { [ZapNative]::ShowWindow([ZapNative]::GetConsoleWindow(), 0) | Out-Null } catch {}
 
+# ---------------------------------------------------------------------------
 # Paths  (script lives in utils\)
+# ---------------------------------------------------------------------------
 $ScriptDir  = if ($PSScriptRoot -and (Test-Path $PSScriptRoot)) { $PSScriptRoot } `
               else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $rootDir    = Split-Path $ScriptDir -Parent
@@ -24,7 +34,9 @@ $utilsDir   = $ScriptDir
 $resultsDir = Join-Path $ScriptDir "test results"
 if (-not (Test-Path $resultsDir)) { New-Item -ItemType Directory -Path $resultsDir | Out-Null }
 
+# ---------------------------------------------------------------------------
 # Color palette (matches Zapret-gui.ps1)
+# ---------------------------------------------------------------------------
 $C = @{
     Primary     = [System.Drawing.Color]::FromArgb(41, 128, 185)
     Success     = [System.Drawing.Color]::FromArgb(39, 174, 96)
@@ -47,7 +59,9 @@ $C = @{
     Cyan        = [System.Drawing.Color]::FromArgb(90, 180, 220)
 }
 
+# ---------------------------------------------------------------------------
 # PRE-LAUNCH CHECKS  (run before any dialog windows)
+# ---------------------------------------------------------------------------
 function Show-FatalError([string]$title, [string]$msg) {
     [System.Windows.Forms.MessageBox]::Show(
         $msg, $title,
@@ -98,14 +112,18 @@ if ($_runningWinws) {
     if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { exit }
 }
 
+# ---------------------------------------------------------------------------
 # Bat file list
+# ---------------------------------------------------------------------------
 $allBat = @(
     Get-ChildItem -Path $rootDir -Filter "*.bat" -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -notlike "service*" -and $_.Name -notlike "!*" } |
     Sort-Object { [Regex]::Replace($_.Name, '(\d+)', { $args[0].Value.PadLeft(8,'0') }) }
 )
 
+# ---------------------------------------------------------------------------
 # Shared button style helper
+# ---------------------------------------------------------------------------
 function New-Btn([string]$text, [int]$x, [int]$y, [int]$w, [int]$h, [System.Drawing.Color]$bg) {
     $b = New-Object System.Windows.Forms.Button
     $b.Location  = New-Object System.Drawing.Point($x, $y)
@@ -120,7 +138,9 @@ function New-Btn([string]$text, [int]$x, [int]$y, [int]$w, [int]$h, [System.Draw
     return $b
 }
 
+# ===========================================================================
 #  WINDOW 1 - Test Type Selection
+# ===========================================================================
 $w1 = New-Object System.Windows.Forms.Form
 $w1.Text            = "Zapret Test Runner - Step 1: Test Type"
 $w1.Size            = New-Object System.Drawing.Size(478, 240)
@@ -293,7 +313,9 @@ $r2 = $w2.ShowDialog()
 if ($r2 -ne [System.Windows.Forms.DialogResult]::OK -or $script:selectedBats.Count -eq 0) { exit }
 $selFiles = $script:selectedBats
 
+# ===========================================================================
 #  WINDOW 3 - Test Runner  (progress bar + log only)
+# ===========================================================================
 $w3 = New-Object System.Windows.Forms.Form
 $w3.Text            = "Zapret Test Runner  [$($testType.ToUpper())]  -  Running..."
 $w3.Size            = New-Object System.Drawing.Size(760, 620)
@@ -392,7 +414,9 @@ $progState = [hashtable]::Synchronized(@{
     Error   = ''
 })
 
+# ---------------------------------------------------------------------------
 #  BACKGROUND SCRIPT  - exact test_zapret.ps1 logic, Write-Host -> wlog
+# ---------------------------------------------------------------------------
 $bgScript = {
     param(
         [object[]] $selFiles,
@@ -478,7 +502,7 @@ $bgScript = {
         }
     }
 
-    # DPI suite 
+    # ---- DPI suite (exact copy) ----
     $dpiTimeoutSeconds = 5
     $dpiRangeBytes     = 262144
     $dpiWarnMinKB      = 14
@@ -496,7 +520,7 @@ $bgScript = {
         try {
             (Invoke-RestMethod -Uri $url -TimeoutSec $dpiTimeoutSeconds) |
                 Select-Object @{n='Id';e={$_.id}}, @{n='Provider';e={$_.provider}},
-                              @{n='Url';e={$_.url}}, @{n='Times';e={$_.times}}
+                              @{n='Country';e={$_.country}}, @{n='Url';e={$_.url}}, @{n='Times';e={$_.times}}
         } catch {
             wlog "[WARN] Fetch dpi suite failed." "Yellow"
             @()
@@ -507,14 +531,14 @@ $bgScript = {
         $suite   = Get-DpiSuite
         $targets = @()
         if ($CustomUrl) {
-            $targets += @{ Id="CUSTOM"; Provider="Custom"; Url=$CustomUrl }
+            $targets += @{ Id="CUSTOM"; Provider="Custom"; Country=$null; Url=$CustomUrl }
         } else {
             foreach ($entry in $suite) {
                 $repeat = $entry.Times
                 if (-not $repeat -or $repeat -lt 1) { $repeat = 1 }
                 for ($i = 0; $i -lt $repeat; $i++) {
                     $suffix = if ($repeat -gt 1) { "@$i" } else { "" }
-                    $targets += @{ Id="$($entry.Id)$suffix"; Provider=$entry.Provider; Url=$entry.Url }
+                    $targets += @{ Id="$($entry.Id)$suffix"; Provider=$entry.Provider; Country=$entry.Country; Url=$entry.Url }
                 }
             }
         }
@@ -544,37 +568,42 @@ $bgScript = {
             $lines  = @()
             foreach ($test in $tests) {
                 $curlArgs = @("-L","--range",$rangeSpec,"-m",$TimeoutSeconds,
-                              "-w","%{http_code} %{size_download}","-o","NUL","-s") + $test.Args + $target.Url
+                              "-w","%{http_code} %{size_upload} %{size_download} %{time_total}","-o","NUL","-s") + $test.Args + $target.Url
                 $output   = & curl.exe @curlArgs 2>&1
                 $exit     = $LASTEXITCODE
                 $text     = ($output | Out-String).Trim()
-                $code     = "NA"; $sizeBytes = 0
+                $code     = "NA"; $upBytes = 0; $downBytes = 0; $time = -1
 
-                if ($text -match '^(?<code>\d{3})\s+(?<size>\d+)$') {
+                if ($text -match '^(?<code>\d{3})\s+(?<up>\d+)\s+(?<down>\d+)\s+(?<time>[\d\.]+)$') {
                     $code      = $matches['code']
-                    $sizeBytes = [int64]$matches['size']
+                    $upBytes   = [int64]$matches['up']
+                    $downBytes = [int64]$matches['down']
+                    $time      = [double]$matches['time']
                 } elseif (($exit -eq 35) -or ($text -match "not supported|does not support|protocol\s+'.+'\s+not\s+supported|protocol\s+.+\s+not\s+supported|unsupported protocol|TLS.not supported|Unrecognized option|Unknown option|unsupported option|unsupported feature|schannel|SSL")) {
                     $code = "UNSUP"
                 } elseif ($text) { $code = "ERR" }
 
-                $sizeKB = [math]::Round($sizeBytes / 1024, 1)
+                $upKB   = [math]::Round($upBytes   / 1024, 1)
+                $downKB = [math]::Round($downBytes / 1024, 1)
                 $status = "OK"; $color = "Green"
 
                 if ($code -eq "UNSUP") { $status="UNSUPPORTED"; $color="Yellow" }
                 elseif ($exit -ne 0 -or $code -eq "ERR" -or $code -eq "NA") { $status="FAIL"; $color="Red" }
 
-                if (($sizeKB -ge $WarnMinKB) -and ($sizeKB -le $WarnMaxKB) -and ($exit -ne 0)) {
+                if (($downKB -ge $WarnMinKB) -and ($downKB -le $WarnMaxKB) -and ($exit -ne 0)) {
                     $status="LIKELY_BLOCKED"; $color="Yellow"; $warned=$true
                 }
 
                 $lines += [PSCustomObject]@{
                     TargetId  = $target.Id; Provider=$target.Provider
                     TestLabel = $test.Label; Code=$code
-                    SizeBytes = $sizeBytes;  SizeKB=$sizeKB
-                    Status    = $status;     Color=$color; Warned=$warned
+                    UpBytes   = $upBytes;   UpKB=$upKB
+                    DownBytes = $downBytes; DownKB=$downKB
+                    Time      = $time
+                    Status    = $status;    Color=$color; Warned=$warned
                 }
             }
-            return [PSCustomObject]@{ TargetId=$target.Id; Provider=$target.Provider; Lines=$lines; Warned=$warned }
+            return [PSCustomObject]@{ TargetId=$target.Id; Provider=$target.Provider; Country=$target.Country; Lines=$lines; Warned=$warned }
         }
 
         $runspaces = @()
@@ -610,9 +639,10 @@ $bgScript = {
 
         foreach ($res in $results) {
             wlog "" "Default"
-            wlog "=== $($res.TargetId) [$($res.Provider)] ===" "DarkCyan"
+            $countryPfx = if ($res.Country) { "[$($res.Country)] " } else { "" }
+            wlog "=== $countryPfx$($res.TargetId) [$($res.Provider)] ===" "DarkCyan"
             foreach ($line in $res.Lines) {
-                $msg = "  [$($line.TestLabel)] code=$($line.Code)  size=$($line.SizeBytes) bytes ($($line.SizeKB) KB)  status=$($line.Status)"
+                $msg = "  [$($line.TestLabel)] code=$($line.Code)  up=$($line.UpKB) KB  down=$($line.DownKB) KB  time=$($line.Time)s  status=$($line.Status)"
                 wlog $msg $line.Color
                 if ($line.Status -eq "LIKELY_BLOCKED") {
                     wlog "    Pattern matches 16-20KB freeze; censor likely cutting this strategy." "Yellow"
@@ -632,7 +662,11 @@ $bgScript = {
         return $results
     }
 
-    # pre-flight (background)
+    # ---- pre-flight (background) ----
+    # Main checks (rootDir / curl / service) already passed before the GUI launched.
+    # Here we only handle runtime state that may have changed since then.
+
+    # Note if winws is currently up (will be stopped before each config anyway)
     $runningWinws = Get-Process -Name "winws" -ErrorAction SilentlyContinue
     if ($runningWinws) {
         wlog "[INFO] winws is running (PID: $($runningWinws.Id -join ', ')). Will be stopped before each config." "Yellow"
@@ -822,6 +856,8 @@ $bgScript = {
                     $rs.Powershell.Dispose()
                 }
                 $runspacePool.Close(); $runspacePool.Dispose()
+
+                # Build lookup and print in original order
                 $targetLookup = @{}
                 foreach ($res in $targetResults) { $targetLookup[$res.Name] = $res }
 
@@ -829,7 +865,7 @@ $bgScript = {
                     $res = $targetLookup[$target.Name]
                     if (-not $res) { continue }
                     $prefix = "  $($target.Name.PadRight($maxNameLen))   "
-                    if ($res.IsUrl -and $res.HttpTokens) { 
+                    if ($res.IsUrl -and $res.HttpTokens) { # emit the full line once with the worst color (like original does per token).
                         $parts = @()
                         $parts += [pscustomobject]@{ Text = $prefix; Color = "Default" }
                         foreach ($tok in $res.HttpTokens) {
@@ -841,6 +877,8 @@ $bgScript = {
                         $pingCol = if ($res.PingResult -eq "Timeout") { "Yellow" } else { "Cyan" }
                         $parts += [pscustomobject]@{ Text = " | Ping: "; Color = "DarkGray" }
                         $parts += [pscustomobject]@{ Text = "$($res.PingResult)"; Color = $pingCol }
+                        # Emit as a MULTIPART log entry using a special separator
+                        # We encode parts as JSON so Append-Log can handle multi-color lines
                         [void]$msgList.Add([pscustomobject]@{ Text = ($parts | ConvertTo-Json -Compress); Color = "MULTIPART" })
                     } else {
                         $pingCol = if ($res.PingResult -eq "Timeout") { "Red" } else { "Cyan" }
@@ -869,7 +907,7 @@ $bgScript = {
             $progState.Current = $configNum
         }
 
-        # Analytics
+        # ---- Analytics ----
         wlog "" "Default"
         wlog "All tests finished." "Green"
         wlog "" "Default"
@@ -942,9 +980,14 @@ $bgScript = {
                 }
             } elseif ($res.Type -eq 'dpi') {
                 foreach ($tr in $res.Results) {
-                    Add-Content $resultFile "  Target: $($tr.TargetId) ($($tr.Provider))"
+                    $country = $tr.Country
+                    if ($country) {
+                        Add-Content $resultFile "  Target: [$country] $($tr.TargetId) ($($tr.Provider))"
+                    } else {
+                        Add-Content $resultFile "  Target: $($tr.TargetId) ($($tr.Provider))"
+                    }
                     foreach ($l in $tr.Lines) {
-                        Add-Content $resultFile "    $($l.TestLabel): code=$($l.Code) size=$($l.SizeKB) KB status=$($l.Status)"
+                        Add-Content $resultFile "    $($l.TestLabel): code=$($l.Code)  up=$($l.UpKB) KB  down=$($l.DownKB) KB  time=$($l.Time)s  status=$($l.Status)"
                     }
                 }
             }
@@ -979,7 +1022,9 @@ $bgScript = {
     }
 }
 
+# ---------------------------------------------------------------------------
 # Launch background runspace
+# ---------------------------------------------------------------------------
 $bgRS = [runspacefactory]::CreateRunspace()
 $bgRS.ApartmentState = "STA"
 $bgRS.ThreadOptions  = "ReuseThread"
@@ -998,12 +1043,14 @@ $bgPS.Runspace = $bgRS
 [void]$bgPS.AddArgument($progState)
 [void]$bgPS.BeginInvoke()
 
-
+# ---------------------------------------------------------------------------
 # UI poll timer - drains msgList, updates progress
+# ---------------------------------------------------------------------------
 $timer          = New-Object System.Windows.Forms.Timer
 $timer.Interval = 80
 
 $timer.Add_Tick({
+    # Drain message queue
     $snapshot = $null
     [System.Threading.Monitor]::Enter($msgList.SyncRoot)
     try {
@@ -1024,6 +1071,7 @@ $timer.Add_Tick({
         }
     }
 
+    # Update progress bar
     $cur   = $progState.Current
     $total = $progState.Total
     if ($total -gt 0) {
@@ -1032,6 +1080,7 @@ $timer.Add_Tick({
         $lblCount.Text     = "$cur / $total"
     }
 
+    # Done?
     if ($progState.Done) {
         $timer.Stop()
         if ($progState.Error) {
