@@ -11,7 +11,7 @@ if (-not $isAdmin) {
 Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);'
 [Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0) | Out-Null
 
-$LOCAL_VERSION = "1.10.2"
+$LOCAL_VERSION = "1.9.9a"
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $colors = @{
@@ -151,6 +151,12 @@ function Get-UpdateCheckStatus {
     return "disabled"
 }
 
+function Write-Utf8NoBom {
+    param([string]$FilePath, [string]$Content)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($FilePath, $Content, $utf8NoBom)
+}
+
 function Initialize-UserLists {
     $listsPath = Join-Path $ScriptPath "lists"
     if (-not (Test-Path $listsPath)) { New-Item -ItemType Directory -Path $listsPath -Force | Out-Null }
@@ -163,7 +169,7 @@ function Initialize-UserLists {
     foreach ($fileName in $defaults.Keys) {
         $filePath = Join-Path $listsPath $fileName
         if (-not (Test-Path $filePath)) {
-            $defaults[$fileName] | Out-File -FilePath $filePath -Encoding UTF8 -NoNewline
+            Write-Utf8NoBom -FilePath $filePath -Content $defaults[$fileName]
         }
     }
 }
@@ -188,7 +194,7 @@ function Open-UserListEditor {
 
     $script:editorModified = $false
 
-    # Editor form 
+    #  Editor form 
     $ef = New-Object System.Windows.Forms.Form
     $ef.Text = "User List Editor - $Title"
     $ef.Size = New-Object System.Drawing.Size(560, 620)
@@ -197,7 +203,7 @@ function Open-UserListEditor {
     $ef.FormBorderStyle = "Sizable"
     $ef.MinimumSize = New-Object System.Drawing.Size(420, 440)
 
-    # Top description panel (2 lines)
+    #  Top description panel (2 lines) 
     $topPanel = New-Object System.Windows.Forms.Panel
     $topPanel.Dock = "Top"
     $topPanel.Height = 62
@@ -220,7 +226,7 @@ function Open-UserListEditor {
     $hintLbl.ForeColor = [System.Drawing.Color]::FromArgb(130, 150, 170)
     $topPanel.Controls.Add($hintLbl)
 
-    # Bottom panel
+    #  Bottom panel 
     $bottomPanel = New-Object System.Windows.Forms.Panel
     $bottomPanel.Dock = "Bottom"
     $bottomPanel.Height = 56
@@ -274,7 +280,7 @@ function Open-UserListEditor {
     $statusLbl.Text = "$lineCountInit lines"
     $bottomPanel.Controls.Add($statusLbl)
 
-    # Main text area 
+    #  Main text area 
     $rtb = New-Object System.Windows.Forms.RichTextBox
     $rtb.Dock = "Fill"
     $rtb.Text = $currentText
@@ -297,15 +303,15 @@ function Open-UserListEditor {
         $statusLbl.ForeColor = $colors.Warning
     })
 
-    # Save logic
+    #  Save logic 
     $doSave = {
         $lines = $rtb.Lines | Where-Object { $_.Trim() -ne "" } | ForEach-Object { $_.Trim() }
         if ($lines.Count -eq 0) {
-            $DefaultContent | Out-File -FilePath $FilePath -Encoding UTF8 -NoNewline
+            Write-Utf8NoBom -FilePath $FilePath -Content $DefaultContent
             $rtb.Text = $DefaultContent
             $count = 1
         } else {
-            $lines | Out-File -FilePath $FilePath -Encoding UTF8
+            Write-Utf8NoBom -FilePath $FilePath -Content ($lines -join "`r`n")
             $count = $lines.Count
         }
         $script:editorModified = $false
@@ -389,7 +395,7 @@ function Open-UserListsEditor {
         }
     )
 
-    # Picker 
+    #  Picker 
     $pf = New-Object System.Windows.Forms.Form
     $pf.Text = "User Lists"
     $pf.Size = New-Object System.Drawing.Size(480, 290)
@@ -465,7 +471,7 @@ function Open-UserListsEditor {
     # Ensure file exists with default content if missing
     if (-not (Test-Path $listsPath)) { New-Item -ItemType Directory -Path $listsPath -Force | Out-Null }
     if (-not (Test-Path $filePath)) {
-        $def.Default | Out-File -FilePath $filePath -Encoding UTF8 -NoNewline
+        Write-Utf8NoBom -FilePath $filePath -Content $def.Default
     }
 
     Open-UserListEditor `
@@ -593,6 +599,8 @@ function Parse-BatFileNew {
         $content = $content -replace '(?m)^\s*::', ''
         $content = $content -replace '(?m)^\s*rem\s.*$', ''
         $content = $content -replace '\^\s*[\r\n]+\s*', ' '
+        # batch escape: ^! -> ! (cmd.exe delayed-expansion escape, not needed once we bypass cmd.exe)
+        $content = $content -replace '\^!', '!'
         
         $allMatches = [regex]::Matches($content, 'winws\.exe["\s]+(.*?)(?=[\r\n]+[^-\s]|$)', 
             [System.Text.RegularExpressions.RegexOptions]::Singleline)
@@ -1210,7 +1218,7 @@ function Run-Diagnostics {
     $report += "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     $report += ""
 
-    # Service 
+    #  Service 
     $serviceInfo = Get-ServiceInfo
     if ($serviceInfo.Installed) {
         $report += "[OK] Service installed: $($serviceInfo.Config)"
@@ -1224,7 +1232,7 @@ function Run-Diagnostics {
     $report += "[$(if($winwsProc){'OK'}else{'X'})] winws.exe: $(if($winwsProc){"Running ($($winwsProc.Count))"}else{'Not running'})"
     $report += ""
 
-    # WinDivert64.sys 
+    #  WinDivert64.sys 
     $binPath = Join-Path $ScriptPath "bin"
     if (Test-Path "$binPath\*.sys") {
         $report += "[OK] WinDivert64.sys found"
@@ -1529,7 +1537,7 @@ function Replace-ActiveFakes {
         }
     }
 
-    # Dialog 
+    #  Dialog 
     $rf = New-Object System.Windows.Forms.Form
     $rf.Text = "Replace Active Fakes"
     $rf.Size = New-Object System.Drawing.Size(480, 480)
