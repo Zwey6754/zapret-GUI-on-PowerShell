@@ -11,7 +11,7 @@ if (-not $isAdmin) {
 Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);'
 [Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0) | Out-Null
 
-$LOCAL_VERSION = "1.9.9a"
+$LOCAL_VERSION = "1.10.2"
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $colors = @{
@@ -220,7 +220,7 @@ function Open-UserListEditor {
     $hintLbl.ForeColor = [System.Drawing.Color]::FromArgb(130, 150, 170)
     $topPanel.Controls.Add($hintLbl)
 
-    # Bottom panel 
+    # Bottom panel
     $bottomPanel = New-Object System.Windows.Forms.Panel
     $bottomPanel.Dock = "Bottom"
     $bottomPanel.Height = 56
@@ -389,7 +389,7 @@ function Open-UserListsEditor {
         }
     )
 
-    # Picker
+    # Picker 
     $pf = New-Object System.Windows.Forms.Form
     $pf.Text = "User Lists"
     $pf.Size = New-Object System.Drawing.Size(480, 290)
@@ -1026,7 +1026,7 @@ function Check-Updates {
 
         Update-StatusBar "Update available: $githubVersion" "Warning"
 
-        # --- Choice dialog ---
+        #  Choice dialog 
         $choiceForm = New-Object System.Windows.Forms.Form
         $choiceForm.Text = "Update Available"
         $choiceForm.Size = New-Object System.Drawing.Size(420, 250)
@@ -1098,7 +1098,7 @@ function Check-Updates {
             return
         }
 
-        # Auto-install path 
+        #  Auto-install path 
         Update-StatusBar "Fetching release info..." "Info"
         try {
             $releaseInfo = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 10
@@ -1141,6 +1141,7 @@ catch {
             "-GuiPath `"$guiPath`""
         ) -Verb RunAs
 
+        # Close this GUI so updater can replace files freely
         $form.Close()
 
     } catch {
@@ -1209,7 +1210,7 @@ function Run-Diagnostics {
     $report += "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     $report += ""
 
-    # Service
+    # Service 
     $serviceInfo = Get-ServiceInfo
     if ($serviceInfo.Installed) {
         $report += "[OK] Service installed: $($serviceInfo.Config)"
@@ -1231,7 +1232,7 @@ function Run-Diagnostics {
         $report += "[X] WinDivert64.sys NOT found"
     }
 
-    # WinDivert conflict
+    # WinDivert conflict (active without winws)
     $wdStatus = (sc.exe query WinDivert 2>&1 | Out-String)
     if ($wdStatus -match "RUNNING|STOP_PENDING") {
         if (-not $winwsProc) {
@@ -1242,7 +1243,7 @@ function Run-Diagnostics {
     }
     $report += ""
 
-    # Base Filtering Engine 
+    #  Base Filtering Engine 
     $bfe = Get-Service -Name BFE -ErrorAction SilentlyContinue
     if ($bfe -and $bfe.Status -eq "Running") {
         $report += "[OK] Base Filtering Engine running"
@@ -1250,7 +1251,8 @@ function Run-Diagnostics {
         $report += "[X] Base Filtering Engine NOT running (required for zapret)"
     }
 
-    # TCP Timestamps 
+    #  TCP Timestamps 
+    # Use registry for locale-independent check (netsh output varies by Windows language)
     $tcpTimestampReg = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" `
         -Name "Tcp1323Opts" -ErrorAction SilentlyContinue)."Tcp1323Opts"
     $tcpTsNetsh = netsh interface tcp show global 2>&1 | Out-String
@@ -1266,7 +1268,7 @@ function Run-Diagnostics {
     }
     $report += ""
 
-    # Proxy 
+    #  Proxy 
     $proxyEnabled = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).ProxyEnable
     if ($proxyEnabled -eq 1) {
         $proxyServer = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).ProxyServer
@@ -1276,7 +1278,7 @@ function Run-Diagnostics {
         $report += "[OK] No system proxy"
     }
 
-    # DNS / DoH 
+    #  DNS / DoH 
     try {
         $dohCount = (Get-ChildItem -Recurse -Path "HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\" -ErrorAction SilentlyContinue |
             Get-ItemProperty -ErrorAction SilentlyContinue |
@@ -1291,7 +1293,7 @@ function Run-Diagnostics {
         $report += "[?] DNS/DoH check failed"
     }
 
-    # Hosts file: youtube entries 
+    #  Hosts file: youtube entries 
     $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
     if (Test-Path $hostsFile) {
         $hostsContent = Get-Content $hostsFile -ErrorAction SilentlyContinue | Out-String
@@ -1303,7 +1305,8 @@ function Run-Diagnostics {
     }
     $report += ""
 
-    # Conflicting services & VPN 
+    #  Conflicting services & VPN 
+    # Use Get-Service (covers ALL services: running + stopped + paused)
     $allServiceObjects = Get-Service -ErrorAction SilentlyContinue
 
     $conflictChecks = @(
@@ -1328,7 +1331,7 @@ function Run-Diagnostics {
         $report += "[OK] No known conflicting software"
     }
 
-    # VPN services 
+    # VPN services — check BOTH service name and display name
     $vpnKeywords = @(
         "vpn", "wireguard", "openvpn", "nordvpn", "expressvpn", "windscribe",
         "mullvad", "protonvpn", "surfshark", "privateinternetaccess",
@@ -1433,35 +1436,191 @@ function Run-Diagnostics {
 
 function Clear-DiscordCache {
     Update-StatusBar "Clearing Discord cache..." "Info"
-    
-    $discordProcess = Get-Process -Name Discord -ErrorAction SilentlyContinue
-    if ($discordProcess) {
-        Stop-Process -Name Discord -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-    }
-    
-    $cachePaths = @(
-        "$env:APPDATA\discord\Cache",
-        "$env:APPDATA\discord\Code Cache",
-        "$env:APPDATA\discord\GPUCache"
+
+    $variants = @(
+        @{ Process = "Discord";            Dir = "$env:APPDATA\discord" },
+        @{ Process = "DiscordPTB";         Dir = "$env:APPDATA\discordptb" },
+        @{ Process = "DiscordCanary";      Dir = "$env:APPDATA\discordcanary" },
+        @{ Process = "DiscordDevelopment"; Dir = "$env:APPDATA\discorddevelopment" }
     )
-    
+
     $clearedCount = 0
-    foreach ($path in $cachePaths) {
-        if (Test-Path $path) {
-            try {
-                Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
-                $clearedCount++
-            } catch {
-                Write-Host "Failed to clear: $path"
+    $foundAny = $false
+    foreach ($v in $variants) {
+        if (-not (Test-Path $v.Dir)) { continue }
+        $foundAny = $true
+
+        $proc = Get-Process -Name $v.Process -ErrorAction SilentlyContinue
+        if ($proc) {
+            Stop-Process -Name $v.Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
+
+        foreach ($sub in @("Cache", "Code Cache", "GPUCache")) {
+            $path = Join-Path $v.Dir $sub
+            if (Test-Path $path) {
+                try {
+                    Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+                    $clearedCount++
+                } catch {
+                    Write-Host "Failed to clear: $path"
+                }
             }
         }
     }
-    
-    if ($clearedCount -gt 0) {
+
+    if (-not $foundAny) {
+        Update-StatusBar "No Discord installations found" "Info"
+    } elseif ($clearedCount -gt 0) {
         Update-StatusBar "Discord cache cleared ($clearedCount folders)" "Success"
     } else {
         Update-StatusBar "No Discord cache found" "Info"
+    }
+}
+
+function Replace-ActiveFakes {
+    $binPath = Join-Path $ScriptPath "bin"
+    if (-not (Test-Path $binPath)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "bin folder not found.",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error)
+        return
+    }
+
+    # fake types this feature supports (mirrors service.bat: only Discord UDP (Voice) and GameFilter UDP)
+    $fakeTypes = @(
+        @{ Label = "Discord UDP (Voice)"; ActiveFile = "ACTIVE_DISCORD_UDP.bin" },
+        @{ Label = "GameFilter UDP";      ActiveFile = "ACTIVE_GAME_UDP.bin" }
+    )
+
+    # Collect all .bin files (excluding ACTIVE_*), and hash the ACTIVE_* files to detect current selection
+    $binFiles = @(Get-ChildItem -LiteralPath $binPath -Filter "*.bin" -ErrorAction SilentlyContinue |
+                Where-Object { $_.BaseName -notlike "ACTIVE_*" })
+
+    if ($binFiles.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "No .bin files were found in the bin folder.",
+            "Replace Active Fakes",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
+    }
+
+    function Get-FakeHashSafe($path) {
+        if (Test-Path $path) {
+            try { return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash } catch { return $null }
+        }
+        return $null
+    }
+
+    foreach ($ft in $fakeTypes) {
+        $activePath = Join-Path $binPath $ft.ActiveFile
+        $activeHash = Get-FakeHashSafe $activePath
+        $ft.Current = "(not found)"
+        if ($activeHash) {
+            foreach ($f in $binFiles) {
+                if ((Get-FakeHashSafe $f.FullName) -eq $activeHash) {
+                    $ft.Current = $f.BaseName
+                    break
+                }
+            }
+        }
+    }
+
+    # Dialog 
+    $rf = New-Object System.Windows.Forms.Form
+    $rf.Text = "Replace Active Fakes"
+    $rf.Size = New-Object System.Drawing.Size(480, 480)
+    $rf.StartPosition = "CenterScreen"
+    $rf.BackColor = $colors.Midnight
+    $rf.FormBorderStyle = "FixedDialog"
+    $rf.MaximizeBox = $false
+
+    $lblType = New-Object System.Windows.Forms.Label
+    $lblType.Location = New-Object System.Drawing.Point(15, 15)
+    $lblType.Size = New-Object System.Drawing.Size(440, 20)
+    $lblType.Text = "Fake type:"
+    $lblType.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $lblType.ForeColor = $colors.Light
+    $rf.Controls.Add($lblType)
+
+    $cmbType = New-Object System.Windows.Forms.ComboBox
+    $cmbType.Location = New-Object System.Drawing.Point(15, 38)
+    $cmbType.Size = New-Object System.Drawing.Size(440, 26)
+    $cmbType.DropDownStyle = "DropDownList"
+    $cmbType.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    foreach ($ft in $fakeTypes) {
+        $cmbType.Items.Add("$($ft.Label)  -  current: $($ft.Current)") | Out-Null
+    }
+    $cmbType.SelectedIndex = 0
+    $rf.Controls.Add($cmbType)
+
+    $lblFile = New-Object System.Windows.Forms.Label
+    $lblFile.Location = New-Object System.Drawing.Point(15, 76)
+    $lblFile.Size = New-Object System.Drawing.Size(440, 20)
+    $lblFile.Text = "Replace with fake file:"
+    $lblFile.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $lblFile.ForeColor = $colors.Light
+    $rf.Controls.Add($lblFile)
+
+    $lb = New-Object System.Windows.Forms.ListBox
+    $lb.Location = New-Object System.Drawing.Point(15, 100)
+    $lb.Size = New-Object System.Drawing.Size(440, 280)
+    $lb.Font = New-Object System.Drawing.Font("Consolas", 10)
+    $lb.BackColor = $colors.DarkGray
+    $lb.ForeColor = $colors.Light
+    foreach ($f in $binFiles) { $lb.Items.Add($f.BaseName) | Out-Null }
+    $lb.SelectedIndex = 0
+    $rf.Controls.Add($lb)
+
+    $btnApply = New-Object System.Windows.Forms.Button
+    $btnApply.Location = New-Object System.Drawing.Point(255, 395)
+    $btnApply.Size = New-Object System.Drawing.Size(100, 36)
+    $btnApply.Text = "Replace"
+    $btnApply.BackColor = $colors.Success
+    $btnApply.ForeColor = $colors.White
+    $btnApply.FlatStyle = "Flat"
+    $btnApply.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $btnApply.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnApply.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $rf.Controls.Add($btnApply)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Location = New-Object System.Drawing.Point(360, 395)
+    $btnCancel.Size = New-Object System.Drawing.Size(95, 36)
+    $btnCancel.Text = "Cancel"
+    $btnCancel.BackColor = $colors.Slate
+    $btnCancel.ForeColor = $colors.White
+    $btnCancel.FlatStyle = "Flat"
+    $btnCancel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $btnCancel.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $rf.Controls.Add($btnCancel)
+
+    $rf.AcceptButton = $btnApply
+    $rf.CancelButton = $btnCancel
+
+    if ($rf.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
+        return
+    }
+
+    $selectedType = $fakeTypes[$cmbType.SelectedIndex]
+    $selectedFile = $binFiles[$lb.SelectedIndex]
+    $activePath = Join-Path $binPath $selectedType.ActiveFile
+
+    try {
+        if (Test-Path $activePath) { Remove-Item $activePath -Force -ErrorAction SilentlyContinue }
+        Copy-Item $selectedFile.FullName $activePath -Force
+        Update-StatusBar "$($selectedType.Label) fake set to $($selectedFile.BaseName) - restart service to apply" "Success"
+    } catch {
+        Update-StatusBar "Failed to replace active fake: $($_.Exception.Message)" "Error"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Failed to replace the active fake file.`n`n$($_.Exception.Message)",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error)
     }
 }
 
@@ -1482,9 +1641,10 @@ function Run-Tests {
     }
 }
 
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Zapret Service Manager v$LOCAL_VERSION"
-$form.Size = New-Object System.Drawing.Size(525, 668)
+$form.Size = New-Object System.Drawing.Size(525, 723)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
@@ -1739,6 +1899,19 @@ $btnTests.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.
 $btnTests.Cursor = [System.Windows.Forms.Cursors]::Hand
 $btnTests.Add_Click({ Run-Tests })
 $form.Controls.Add($btnTests)
+
+$btnReplaceFakes = New-Object System.Windows.Forms.Button
+$btnReplaceFakes.Location = New-Object System.Drawing.Point(15, 610)
+$btnReplaceFakes.Size = New-Object System.Drawing.Size(475, 40)
+$btnReplaceFakes.Text = "Replace Active Fakes (Discord UDP / GameFilter UDP)"
+$btnReplaceFakes.BackColor = $colors.DarkGray
+$btnReplaceFakes.ForeColor = $colors.Light
+$btnReplaceFakes.FlatStyle = "Flat"
+$btnReplaceFakes.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$btnReplaceFakes.Cursor = [System.Windows.Forms.Cursors]::Hand
+$btnReplaceFakes.Add_Click({ Replace-ActiveFakes })
+$form.Controls.Add($btnReplaceFakes)
+
 
 Update-StatusDisplay
 Update-ServiceStatusBar
