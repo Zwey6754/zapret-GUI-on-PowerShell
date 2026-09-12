@@ -137,11 +137,15 @@ service.bat - установка в автозапуск и другие фун�
 
 
 ## Как переустановить/обновить полностью?
+
 - Переустановить текущий конфиг: 
-	!start-zapret-gui.bat -> Remove Services -> install service 
+	!start-zapret-gui.bat -> Remove Services -> install service
+
 - Обновление саомго запрета:
     !start-zapret-gui.bat -> (если не включена авто проверка то нажмите "Check updates" -> auto install
+  
 - Ручное обновление запрета
+  
 	1. !start-zapret-gui.bat -> (если не включена авто проверка то нажмите "Check updates" -> Open release page 
 	Откроется страница с последней версией, где надо скачать Zapret-wiht-GUI-X.X.X.zip
 	2. Далее удалите папку с старым запретом (если надо то перед этим сохраните файлы с -user в папке lists(после поместите их обратно но в новый)
