@@ -65,7 +65,7 @@
 
     Run Tests - Запуск тестовых конфигураций для проверки стратегий обхода
 
-	Replace Active Fakes - показывает список .bin-файлов, определяет текущий активный фейк по SHA256-хэшу, даёт заменить для Discord UDP (Voice) и GameFilter UDP.)
+	Replace Active Fakes - даёт заменить активный фейк для Discord UDP (Voice) и GameFilter UDP.
 
 ### Статусная панель
 
