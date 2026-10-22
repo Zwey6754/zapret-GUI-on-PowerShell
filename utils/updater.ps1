@@ -17,7 +17,6 @@ function Write-Step {
     Write-Host $Msg -ForegroundColor $Color
 }
 
-# Validate args
 if (-not $ScriptPath -or -not $ZipUrl -or -not $GuiPath) {
     Write-Host "[ERROR] Missing required parameters." -ForegroundColor Red
     Write-Host "Usage: updater.ps1 -ScriptPath <path> -ZipUrl <url> -GuiPath <path>" -ForegroundColor Yellow
@@ -56,7 +55,6 @@ if ($topLevelFiles.Count -eq 0 -and $topLevelDirs.Count -eq 1) {
     Write-Step "      Extracted to: $sourceDir" "DarkGray"
 
     Write-Step "[3/5] Backing up user lists..."
-    # Save user list files so they survive the update
     $userListFiles = @(
         "lists\list-general-user.txt",
         "lists\list-exclude-user.txt",
@@ -72,21 +70,29 @@ if ($topLevelFiles.Count -eq 0 -and $topLevelDirs.Count -eq 1) {
     }
 
     Write-Step "[4/5] Copying new files..."
-    # Copy all files from extracted folder over current installation
-    # Exclude user-specific files and utils folder entirely
-    $excludeDirs  = @("utils")
+$utilsBackupDir = Join-Path $env:TEMP "zapret_utils_backup_$(Get-Random)"
+$utilsSrc = Join-Path $ScriptPath "utils"
+$utilsPreserve = @("test results", "targets.txt") 
+
+if (Test-Path $utilsSrc) {
+    New-Item -ItemType Directory -Path $utilsBackupDir -Force | Out-Null
+    foreach ($name in $utilsPreserve) {
+        $src = Join-Path $utilsSrc $name
+        if (Test-Path $src) {
+            Copy-Item $src -Destination $utilsBackupDir -Recurse -Force
+            Write-Step "      Backed up: utils\$name" "DarkGray"
+        }
+    }
+}
     $excludeFiles = @("list-general-user.txt", "list-exclude-user.txt", "ipset-exclude-user.txt")
 
     $allItems = Get-ChildItem $sourceDir -Recurse
     foreach ($item in $allItems) {
         $relPath = $item.FullName.Substring($sourceDir.Length).TrimStart('\', '/')
-
-        # Skip excluded dirs
         $skip = $false
         foreach ($excDir in $excludeDirs) {
             if ($relPath -like "$excDir*") { $skip = $true; break }
         }
-        # Skip excluded files
         foreach ($excFile in $excludeFiles) {
             if ($item.Name -eq $excFile) { $skip = $true; break }
         }
@@ -108,7 +114,6 @@ if ($topLevelFiles.Count -eq 0 -and $topLevelDirs.Count -eq 1) {
     }
     Write-Step "      Files copied." "DarkGray"
 
-    # Restore user lists
     if ($backups.Count -gt 0) {
         Write-Step "      Restoring user lists..." "DarkGray"
         foreach ($rel in $backups.Keys) {
@@ -125,7 +130,6 @@ if ($topLevelFiles.Count -eq 0 -and $topLevelDirs.Count -eq 1) {
     Write-Step "[OK] Update complete! Restarting GUI..." "Green"
     Start-Sleep -Seconds 1
 
-    # Relaunch GUI
     Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$GuiPath`"" -Verb RunAs
 
 } catch {
