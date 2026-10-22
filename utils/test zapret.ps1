@@ -491,16 +491,24 @@ $bgScript = {
             if (-not $p.ExecutablePath) { continue }
             if ($current -and $current -contains $p.CommandLine) { continue }
             $exe = $p.ExecutablePath
-            $processArgs = ""
-            if ($p.CommandLine) {
-                $quotedExe = '"' + $exe + '"'
-                if ($p.CommandLine.StartsWith($quotedExe)) {
-                    $processArgs = $p.CommandLine.Substring($quotedExe.Length).Trim()
-                } elseif ($p.CommandLine.StartsWith($exe)) {
-                    $processArgs = $p.CommandLine.Substring($exe.Length).Trim()
-                }
+            # Split the program token off the command line to recover the arguments.
+            $processArgs = $null
+            if ($p.CommandLine -match '^\s*"[^"]*"\s*(.*)$') {
+                $processArgs = $matches[1].Trim()
+            } elseif ($p.CommandLine -and $p.CommandLine.StartsWith($exe, [StringComparison]::OrdinalIgnoreCase)) {
+                $processArgs = $p.CommandLine.Substring($exe.Length).Trim()
+            } elseif ($p.CommandLine -match '^\s*\S+\s*(.*)$') {
+                $processArgs = $matches[1].Trim()
             }
-            Start-Process -FilePath $exe -ArgumentList $processArgs -WorkingDirectory (Split-Path $exe -Parent) -WindowStyle Minimized | Out-Null
+            if (-not $processArgs) {
+                wlog "[WARN] Could not read arguments of previous winws instance ($exe); skipping restore." "Yellow"
+                continue
+            }
+            try {
+                Start-Process -FilePath $exe -ArgumentList $processArgs -WorkingDirectory (Split-Path $exe -Parent) -WindowStyle Minimized | Out-Null
+            } catch {
+                wlog "[WARN] Failed to restore previous winws instance ($exe): $_" "Yellow"
+            }
         }
     }
 

@@ -11,7 +11,7 @@ if (-not $isAdmin) {
 Add-Type -Name Win -Namespace Native -MemberDefinition '[DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);'
 [Native.Win]::ShowWindow([Native.Win]::GetConsoleWindow(), 0) | Out-Null
 
-$LOCAL_VERSION = "1.10.2"
+$LOCAL_VERSION = "1.10.4"
 $ScriptPath = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $colors = @{
@@ -122,18 +122,74 @@ function Update-ServiceStatusBar {
     }
 }
 
-function Get-GameFilterStatus {
+function Test-GameFilterRange {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $clean = $Text -replace '\s', ''
+    if (-not $clean) { return $null }
+    foreach ($item in $clean.Split(',')) {
+        if ($item -notmatch '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$') { return $null }
+        $parts = $item.Split('-')
+        $start = [int]$parts[0]
+        $end   = if ($parts.Count -gt 1) { [int]$parts[1] } else { $start }
+        if ($start -gt 65535 -or $end -gt 65535 -or $start -gt $end) { return $null }
+    }
+    return $clean
+}
+
+function Get-GameFilterSettings {
+    $default = "1024-65535"
+    $s = @{ Mode = "disabled"; TCPRange = $default; UDPRange = $default }
     $flagFile = Join-Path $ScriptPath "utils\game_filter.enabled"
-    if (-not (Test-Path $flagFile)) {
-        return @{Status="disabled"; Filter="12"; FilterTCP="12"; FilterUDP="12"}
+    if (-not (Test-Path $flagFile)) { return $s }
+
+    $tcpCandidate = $null
+    $udpCandidate = $null
+    foreach ($line in @(Get-Content $flagFile -ErrorAction SilentlyContinue)) {
+        $line = ($line + "").Trim()
+        if (-not $line) { continue }
+        $key = $line
+        $val = $null
+        $eq = $line.IndexOf('=')
+        if ($eq -ge 0) {
+            $key = $line.Substring(0, $eq)
+            $val = $line.Substring($eq + 1)
+        }
+        switch ($key.Trim().ToLower()) {
+            "mode" { $s.Mode = ($val + "").Trim().ToLower() }
+            "all"  { $s.Mode = "all" }
+            "tcp"  { if ([string]::IsNullOrEmpty($val)) { $s.Mode = "tcp" } else { $tcpCandidate = $val } }
+            "udp"  { if ([string]::IsNullOrEmpty($val)) { $s.Mode = "udp" } else { $udpCandidate = $val } }
+        }
     }
-    $mode = ((Get-Content $flagFile -ErrorAction SilentlyContinue | Select-Object -First 1) + "").Trim().ToLower()
-    switch ($mode) {
-        "all" { return @{Status="enabled (TCP+UDP)"; Filter="1024-65535"; FilterTCP="1024-65535"; FilterUDP="1024-65535"} }
-        "tcp" { return @{Status="enabled (TCP)";     Filter="1024-65535"; FilterTCP="1024-65535"; FilterUDP="12"        } }
-        "udp" { return @{Status="enabled (UDP)";     Filter="1024-65535"; FilterTCP="12";         FilterUDP="1024-65535"} }
-        default { return @{Status="enabled (TCP+UDP)"; Filter="1024-65535"; FilterTCP="1024-65535"; FilterUDP="1024-65535"} }
+
+    $v = Test-GameFilterRange $tcpCandidate
+    if ($v) { $s.TCPRange = $v }
+    $v = Test-GameFilterRange $udpCandidate
+    if ($v) { $s.UDPRange = $v }
+    return $s
+}
+
+function Get-GameFilterStatus {
+    $g   = Get-GameFilterSettings
+    $tcp = $g.TCPRange
+    $udp = $g.UDPRange
+    switch ($g.Mode) {
+        "all" { return @{Status="enabled (TCP+UDP)"; Mode="all"; Filter=$tcp; FilterTCP=$tcp; FilterUDP=$udp; TCPRange=$tcp; UDPRange=$udp} }
+        "tcp" { return @{Status="enabled (TCP)";     Mode="tcp"; Filter=$tcp; FilterTCP=$tcp; FilterUDP="12"; TCPRange=$tcp; UDPRange=$udp} }
+        "udp" { return @{Status="enabled (UDP)";     Mode="udp"; Filter=$udp; FilterTCP="12"; FilterUDP=$udp; TCPRange=$tcp; UDPRange=$udp} }
+        default { return @{Status="disabled";        Mode="disabled"; Filter="12"; FilterTCP="12"; FilterUDP="12"; TCPRange=$tcp; UDPRange=$udp} }
     }
+}
+
+function Save-GameFilterSettings {
+    param([string]$Mode, [string]$TCPRange, [string]$UDPRange)
+    $utilsPath = Join-Path $ScriptPath "utils"
+    if (-not (Test-Path $utilsPath)) { New-Item -ItemType Directory -Path $utilsPath -Force | Out-Null }
+    $flagFile = Join-Path $utilsPath "game_filter.enabled"
+    # same file format as service.bat (:save_game_filter_settings)
+    $content = "mode=$Mode`r`ntcp=$TCPRange`r`nudp=$UDPRange`r`n"
+    Write-Utf8NoBom -FilePath $flagFile -Content $content
 }
 
 function Get-IPSetStatus {
@@ -894,29 +950,162 @@ function Install-ZapretService {
     Update-StatusDisplay
 }
 
-function Toggle-GameFilter {
-    $flagFile  = Join-Path $ScriptPath "utils\game_filter.enabled"
-    $utilsPath = Join-Path $ScriptPath "utils"
+function Show-GameFilterDialog {
+    $cur = Get-GameFilterStatus
 
-    # Cycle: disabled -> all -> tcp -> udp -> disabled
-    $current = (Get-GameFilterStatus).Status
-    switch -Wildcard ($current) {
-        "disabled"         { $next = "all" }
-        "enabled (TCP+UDP)"{ $next = "tcp" }
-        "enabled (TCP)"    { $next = "udp" }
-        default            { $next = "disabled" }
+    $gf = New-Object System.Windows.Forms.Form
+    $gf.Text = "Game Filter"
+    $gf.ClientSize = New-Object System.Drawing.Size(460, 395)
+    $gf.StartPosition = "CenterScreen"
+    $gf.FormBorderStyle = "FixedDialog"
+    $gf.MaximizeBox = $false
+    $gf.MinimizeBox = $false
+    $gf.BackColor = $colors.Midnight
+
+    $lblMode = New-Object System.Windows.Forms.Label
+    $lblMode.Location = New-Object System.Drawing.Point(20, 15)
+    $lblMode.Size = New-Object System.Drawing.Size(420, 24)
+    $lblMode.Text = "Game filter mode:"
+    $lblMode.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $lblMode.ForeColor = $colors.Light
+    $gf.Controls.Add($lblMode)
+
+    $radioDefs = @(
+        @{ Key = "disabled"; Text = "Disabled" },
+        @{ Key = "all";      Text = "TCP and UDP" },
+        @{ Key = "tcp";      Text = "TCP only" },
+        @{ Key = "udp";      Text = "UDP only" }
+    )
+    $radios = @{}
+    $ry = 45
+    foreach ($rd in $radioDefs) {
+        $rb = New-Object System.Windows.Forms.RadioButton
+        $rb.Location = New-Object System.Drawing.Point(30, $ry)
+        $rb.Size = New-Object System.Drawing.Size(400, 26)
+        $rb.Text = $rd.Text
+        $rb.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        $rb.ForeColor = $colors.Light
+        $rb.Checked = ($cur.Mode -eq $rd.Key)
+        $gf.Controls.Add($rb)
+        $radios[$rd.Key] = $rb
+        $ry += 30
     }
 
-    if (-not (Test-Path $utilsPath)) { New-Item -ItemType Directory -Path $utilsPath -Force | Out-Null }
+    $lblTcp = New-Object System.Windows.Forms.Label
+    $lblTcp.Location = New-Object System.Drawing.Point(20, 175)
+    $lblTcp.Size = New-Object System.Drawing.Size(420, 22)
+    $lblTcp.Text = "TCP ports:"
+    $lblTcp.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $lblTcp.ForeColor = $colors.Light
+    $gf.Controls.Add($lblTcp)
 
-    $labels = @{all="TCP+UDP"; tcp="TCP only"; udp="UDP only"}
-    if ($next -eq "disabled") {
-        if (Test-Path $flagFile) { Remove-Item $flagFile -Force }
-        Update-StatusBar "Game filter: disabled - restart service to apply" "Warning"
-    } else {
-        $next | Out-File -FilePath $flagFile -Encoding ASCII -NoNewline
-        Update-StatusBar "Game filter: $($labels[$next]) - restart service to apply" "Warning"
+    $txtTcp = New-Object System.Windows.Forms.TextBox
+    $txtTcp.Location = New-Object System.Drawing.Point(20, 200)
+    $txtTcp.Size = New-Object System.Drawing.Size(420, 26)
+    $txtTcp.Font = New-Object System.Drawing.Font("Consolas", 10)
+    $txtTcp.BackColor = $colors.DarkGray
+    $txtTcp.ForeColor = $colors.Light
+    $txtTcp.BorderStyle = "FixedSingle"
+    $txtTcp.Text = $cur.TCPRange
+    $gf.Controls.Add($txtTcp)
+
+    $lblUdp = New-Object System.Windows.Forms.Label
+    $lblUdp.Location = New-Object System.Drawing.Point(20, 240)
+    $lblUdp.Size = New-Object System.Drawing.Size(420, 22)
+    $lblUdp.Text = "UDP ports:"
+    $lblUdp.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $lblUdp.ForeColor = $colors.Light
+    $gf.Controls.Add($lblUdp)
+
+    $txtUdp = New-Object System.Windows.Forms.TextBox
+    $txtUdp.Location = New-Object System.Drawing.Point(20, 265)
+    $txtUdp.Size = New-Object System.Drawing.Size(420, 26)
+    $txtUdp.Font = New-Object System.Drawing.Font("Consolas", 10)
+    $txtUdp.BackColor = $colors.DarkGray
+    $txtUdp.ForeColor = $colors.Light
+    $txtUdp.BorderStyle = "FixedSingle"
+    $txtUdp.Text = $cur.UDPRange
+    $gf.Controls.Add($txtUdp)
+
+    $lblHint = New-Object System.Windows.Forms.Label
+    $lblHint.Location = New-Object System.Drawing.Point(20, 300)
+    $lblHint.Size = New-Object System.Drawing.Size(420, 40)
+    $lblHint.Text = "Ports / ranges separated by commas. Example: 1024-1934,1936-65535`n(default: 1024-65535, e.g. skip 1935 to exclude RTMP)"
+    $lblHint.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+    $lblHint.ForeColor = [System.Drawing.Color]::Silver
+    $gf.Controls.Add($lblHint)
+
+    $btnDefaults = New-Object System.Windows.Forms.Button
+    $btnDefaults.Location = New-Object System.Drawing.Point(20, 345)
+    $btnDefaults.Size = New-Object System.Drawing.Size(120, 36)
+    $btnDefaults.Text = "Default ports"
+    $btnDefaults.BackColor = $colors.DarkGray
+    $btnDefaults.ForeColor = $colors.Light
+    $btnDefaults.FlatStyle = "Flat"
+    $btnDefaults.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $btnDefaults.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnDefaults.Add_Click({
+        $txtTcp.Text = "1024-65535"
+        $txtUdp.Text = "1024-65535"
+    })
+    $gf.Controls.Add($btnDefaults)
+
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Location = New-Object System.Drawing.Point(240, 345)
+    $btnSave.Size = New-Object System.Drawing.Size(95, 36)
+    $btnSave.Text = "Save"
+    $btnSave.BackColor = $colors.Success
+    $btnSave.ForeColor = $colors.White
+    $btnSave.FlatStyle = "Flat"
+    $btnSave.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $btnSave.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $script:gfResult = $null
+    $btnSave.Add_Click({
+        $tcp = Test-GameFilterRange $txtTcp.Text
+        $udp = Test-GameFilterRange $txtUdp.Text
+        if (-not $tcp -or -not $udp) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Invalid port list.`n`nUse ports/ranges 1-65535 separated by commas,`nfor example: 1024-1934,1936-65535",
+                "Game Filter",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            return
+        }
+        $mode = "disabled"
+        foreach ($k in $radios.Keys) { if ($radios[$k].Checked) { $mode = $k } }
+        $script:gfResult = @{ Mode = $mode; TCP = $tcp; UDP = $udp }
+        $gf.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $gf.Close()
+    })
+    $gf.Controls.Add($btnSave)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Location = New-Object System.Drawing.Point(345, 345)
+    $btnCancel.Size = New-Object System.Drawing.Size(95, 36)
+    $btnCancel.Text = "Cancel"
+    $btnCancel.BackColor = $colors.Danger
+    $btnCancel.ForeColor = $colors.White
+    $btnCancel.FlatStyle = "Flat"
+    $btnCancel.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $btnCancel.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $gf.Controls.Add($btnCancel)
+    $gf.CancelButton = $btnCancel
+
+    $dlgResult = $gf.ShowDialog()
+    $gf.Dispose()
+    if ($dlgResult -ne [System.Windows.Forms.DialogResult]::OK -or -not $script:gfResult) { return }
+
+    $r = $script:gfResult
+    Save-GameFilterSettings -Mode $r.Mode -TCPRange $r.TCP -UDPRange $r.UDP
+
+    $labels = @{ disabled = "disabled"; all = "TCP+UDP"; tcp = "TCP only"; udp = "UDP only" }
+    $msg = "Game filter: $($labels[$r.Mode])"
+    if ($r.Mode -ne "disabled") {
+        if ($r.Mode -ne "udp") { $msg += " | TCP $($r.TCP)" }
+        if ($r.Mode -ne "tcp") { $msg += " | UDP $($r.UDP)" }
     }
+    Update-StatusBar "$msg - restart service to apply" "Warning"
     Update-StatusDisplay
 }
 
@@ -1344,7 +1533,7 @@ function Run-Diagnostics {
         "vpn", "wireguard", "openvpn", "nordvpn", "expressvpn", "windscribe",
         "mullvad", "protonvpn", "surfshark", "privateinternetaccess",
         "ipvanish", "cyberghost", "hotspotshield", "tunnelbear", "hideme",
-        "hide\.me", "torguard", "astrill", "purevpn", "zenmate""nekoray", "throne"
+        "hide\.me", "torguard", "astrill", "purevpn", "zenmate", "nekoray", "throne", "happservice"
     )
     $foundVpn = @()
     foreach ($svc in $allServiceObjects) {
@@ -1793,7 +1982,7 @@ $btnGameFilter.ForeColor = $colors.Light
 $btnGameFilter.FlatStyle = "Flat"
 $btnGameFilter.Font = New-Object System.Drawing.Font("Segoe UI", 10)
 $btnGameFilter.Cursor = [System.Windows.Forms.Cursors]::Hand
-$btnGameFilter.Add_Click({ Toggle-GameFilter })
+$btnGameFilter.Add_Click({ Show-GameFilterDialog })
 $form.Controls.Add($btnGameFilter)
 
 $btnIPSet = New-Object System.Windows.Forms.Button
