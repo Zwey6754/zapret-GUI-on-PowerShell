@@ -122,7 +122,18 @@ function Update-ServiceStatusBar {
     }
 }
 
+function Show-Progress {
+    try { $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor; [System.Windows.Forms.Application]::DoEvents() } catch {}
+}
+
+function Hide-Progress {
+    try { $form.Cursor = [System.Windows.Forms.Cursors]::Default } catch {}
+}
+
 function Test-GameFilterRange {
+    # Same rules as service.bat (:validate_game_filter_range):
+    # comma-separated ports / ranges, 1..65535, start <= end, spaces ignored.
+    # Returns the normalized string, or $null if invalid.
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
     $clean = $Text -replace '\s', ''
@@ -138,6 +149,9 @@ function Test-GameFilterRange {
 }
 
 function Get-GameFilterSettings {
+    # utils\game_filter.enabled formats:
+    #   new (1.10.4+):  mode=all|tcp|udp|disabled / tcp=<ports> / udp=<ports>
+    #   legacy:         a single word: all | tcp | udp
     $default = "1024-65535"
     $s = @{ Mode = "disabled"; TCPRange = $default; UDPRange = $default }
     $flagFile = Join-Path $ScriptPath "utils\game_filter.enabled"
@@ -1170,28 +1184,176 @@ function Update-IPSetList {
     }
 }
 
+$script:HostsKeepLines = 21   # lines at the top of the hosts file that are never touched
+
+function Merge-HostsContent {
+    # Keeps the first $KeepLines lines of the current hosts text, replaces everything below with $NewLines.
+    param([string]$CurrentText, [string[]]$NewLines, [int]$KeepLines = 21)
+
+    $cur = New-Object 'System.Collections.Generic.List[string]'
+    if ($CurrentText) { foreach ($l in ($CurrentText -split "\r?\n")) { $cur.Add($l.TrimEnd()) } }
+    while ($cur.Count -gt 0 -and $cur[$cur.Count - 1] -eq "") { $cur.RemoveAt($cur.Count - 1) }
+
+    $new = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($l in $NewLines) { $new.Add(([string]$l).TrimEnd()) }
+    while ($new.Count -gt 0 -and $new[$new.Count - 1] -eq "") { $new.RemoveAt($new.Count - 1) }
+
+    $head = New-Object 'System.Collections.Generic.List[string]'
+    $tail = New-Object 'System.Collections.Generic.List[string]'
+    for ($i = 0; $i -lt $cur.Count; $i++) {
+        if ($i -lt $KeepLines) { $head.Add($cur[$i]) } else { $tail.Add($cur[$i]) }
+    }
+
+    $upToDate = ($tail.Count -eq $new.Count)
+    if ($upToDate) {
+        for ($i = 0; $i -lt $new.Count; $i++) {
+            if ($tail[$i] -ne $new[$i]) { $upToDate = $false; break }
+        }
+    }
+
+    $all = @($head.ToArray()) + @($new.ToArray())
+    return @{
+        UpToDate     = $upToDate
+        Text         = (($all -join "`r`n") + "`r`n")
+        KeptLines    = $head.Count
+        RemovedLines = $tail.Count
+        NewLines     = $new.Count
+    }
+}
+
+function Show-HostsUpdateDialog {
+    $script:hostsChoice = "cancel"
+
+    $hf = New-Object System.Windows.Forms.Form
+    $hf.Text = "Update Hosts"
+    $hf.ClientSize = New-Object System.Drawing.Size(430, 270)
+    $hf.StartPosition = "CenterScreen"
+    $hf.FormBorderStyle = "FixedDialog"
+    $hf.MaximizeBox = $false
+    $hf.MinimizeBox = $false
+    $hf.BackColor = $colors.Midnight
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Location = New-Object System.Drawing.Point(15, 15)
+    $lbl.Size = New-Object System.Drawing.Size(400, 22)
+    $lbl.Text = "Hosts file needs an update. How to apply it?"
+    $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $lbl.ForeColor = $colors.Light
+    $hf.Controls.Add($lbl)
+
+    $btnAutoH = New-Object System.Windows.Forms.Button
+    $btnAutoH.Location = New-Object System.Drawing.Point(15, 48)
+    $btnAutoH.Size = New-Object System.Drawing.Size(400, 44)
+    $btnAutoH.Text = "Auto  (write new data into hosts)"
+    $btnAutoH.BackColor = $colors.Success
+    $btnAutoH.ForeColor = $colors.White
+    $btnAutoH.FlatStyle = "Flat"
+    $btnAutoH.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $btnAutoH.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnAutoH.Add_Click({ $script:hostsChoice = "auto"; $hf.Close() })
+    $hf.Controls.Add($btnAutoH)
+
+    $btnManualH = New-Object System.Windows.Forms.Button
+    $btnManualH.Location = New-Object System.Drawing.Point(15, 100)
+    $btnManualH.Size = New-Object System.Drawing.Size(400, 44)
+    $btnManualH.Text = "Manual  (open new data and the hosts folder)"
+    $btnManualH.BackColor = $colors.Primary
+    $btnManualH.ForeColor = $colors.White
+    $btnManualH.FlatStyle = "Flat"
+    $btnManualH.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $btnManualH.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnManualH.Add_Click({ $script:hostsChoice = "manual"; $hf.Close() })
+    $hf.Controls.Add($btnManualH)
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Location = New-Object System.Drawing.Point(15, 154)
+    $hint.Size = New-Object System.Drawing.Size(400, 62)
+    $hint.Text = "Auto keeps the first $($script:HostsKeepLines) lines of your hosts file and REPLACES everything below them with the new data. Any custom entries below line $($script:HostsKeepLines) will be removed. A backup is saved next to the hosts file (hosts.zapret-*.bak)."
+    $hint.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+    $hint.ForeColor = [System.Drawing.Color]::Silver
+    $hf.Controls.Add($hint)
+
+    $btnCancelH = New-Object System.Windows.Forms.Button
+    $btnCancelH.Location = New-Object System.Drawing.Point(15, 222)
+    $btnCancelH.Size = New-Object System.Drawing.Size(400, 34)
+    $btnCancelH.Text = "Cancel"
+    $btnCancelH.BackColor = $colors.Slate
+    $btnCancelH.ForeColor = $colors.White
+    $btnCancelH.FlatStyle = "Flat"
+    $btnCancelH.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $btnCancelH.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnCancelH.Add_Click({ $script:hostsChoice = "cancel"; $hf.Close() })
+    $hf.Controls.Add($btnCancelH)
+    $hf.CancelButton = $btnCancelH
+
+    $hf.ShowDialog() | Out-Null
+    $hf.Dispose()
+    return $script:hostsChoice
+}
+
 function Update-HostsFile {
     Update-StatusBar "Checking hosts file..." "Info"
     $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
-    $hostsUrl = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/hosts"
-    $tempFile = "$env:TEMP\zapret_hosts.txt"
+    $hostsUrl  = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/hosts"
+    $tempFile  = "$env:TEMP\zapret_hosts.txt"
     try {
-        Invoke-WebRequest -Uri $hostsUrl -OutFile $tempFile -TimeoutSec 10 -UseBasicParsing
-        $repoContent = Get-Content $tempFile
-        $firstLine = $repoContent[0]
-        $lastLine = $repoContent[-1]
-        $hostsContent = Get-Content $hostsFile -ErrorAction SilentlyContinue
-        if ($hostsContent -notcontains $firstLine -or $hostsContent -notcontains $lastLine) {
-            Update-StatusBar "Hosts file needs update" "Warning"
+        Invoke-WebRequest -Uri $hostsUrl -OutFile $tempFile -TimeoutSec 15 -UseBasicParsing
+        $newText  = [System.IO.File]::ReadAllText($tempFile, [System.Text.Encoding]::UTF8)
+        $newLines = @($newText -split "\r?\n")
+
+        # sanity check: must contain at least one real "IP host" entry, otherwise never touch hosts
+        $entries = @($newLines | Where-Object { $_ -match '^\s*[0-9A-Fa-f:.]+\s+\S+' -and $_ -notmatch '^\s*#' })
+        if ($entries.Count -lt 1) { throw "Downloaded file does not look like a hosts file" }
+
+        $curText = ""
+        if (Test-Path $hostsFile) { $curText = [System.IO.File]::ReadAllText($hostsFile, [System.Text.Encoding]::UTF8) }
+        $merge = Merge-HostsContent -CurrentText $curText -NewLines $newLines -KeepLines $script:HostsKeepLines
+
+        if ($merge.UpToDate) {
+            Update-StatusBar "Hosts file up to date!" "Success"
+            Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+            return
+        }
+
+        Update-StatusBar "Hosts file needs update" "Warning"
+        $choice = Show-HostsUpdateDialog
+
+        if ($choice -eq "manual") {
             Start-Process notepad.exe -ArgumentList $tempFile
             Start-Sleep -Milliseconds 300
             Start-Process explorer.exe -ArgumentList "/select,`"$hostsFile`""
-        } else {
-            Update-StatusBar "Hosts file up to date!" "Success"
-            Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+            Update-StatusBar "Manual mode: copy the new data into hosts" "Info"
+            return
         }
+        if ($choice -ne "auto") {
+            Update-StatusBar "Hosts update cancelled" "Info"
+            Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+            return
+        }
+
+        # backup (keep the 3 newest)
+        $stamp  = Get-Date -Format "yyyyMMdd-HHmmss"
+        $backup = "$hostsFile.zapret-$stamp.bak"
+        if (Test-Path $hostsFile) { Copy-Item $hostsFile $backup -Force }
+        Get-ChildItem -Path (Split-Path $hostsFile -Parent) -Filter "hosts.zapret-*.bak" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -Skip 3 |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+        if (Test-Path $hostsFile) {
+            $item = Get-Item $hostsFile -Force
+            if ($item.IsReadOnly) { $item.IsReadOnly = $false }
+        }
+        [System.IO.File]::WriteAllText($hostsFile, $merge.Text, (New-Object System.Text.UTF8Encoding($false)))
+        ipconfig /flushdns 2>&1 | Out-Null
+        Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+        Update-StatusBar "Hosts updated: kept $($merge.KeptLines) lines, wrote $($merge.NewLines) new (replaced $($merge.RemovedLines) old)" "Success"
     } catch {
-        Update-StatusBar "Failed: $($_.Exception.Message)" "Error"
+        Update-StatusBar "Hosts update failed: $($_.Exception.Message)" "Error"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Could not update the hosts file automatically.`n`n$($_.Exception.Message)`n`nAntivirus software often blocks changes to hosts. You can retry and choose 'Manual'.",
+            "Update Hosts",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
     }
 }
 
@@ -1328,14 +1490,15 @@ catch {
         }
 
         Update-StatusBar "Launching updater..." "Info"
-        $guiPath = $MyInvocation.ScriptName
+        $guiPath = $PSCommandPath
         if (-not $guiPath) { $guiPath = Join-Path $ScriptPath "zapret-gui.ps1" }
 
         Start-Process powershell.exe -ArgumentList (
             "-NoProfile -ExecutionPolicy Bypass -File `"$updaterPath`"",
             "-ScriptPath `"$ScriptPath`"",
             "-ZipUrl `"$zipUrl`"",
-            "-GuiPath `"$guiPath`""
+            "-GuiPath `"$guiPath`"",
+            "-GuiPid $PID"
         ) -Verb RunAs
 
         # Close this GUI so updater can replace files freely
@@ -1398,6 +1561,328 @@ function Show-ServiceStatus {
     [System.Windows.Forms.MessageBox]::Show($message, "Service Status", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
 }
 
+$script:VpnAdapterRegex = '(?i)(tap-windows|\btap\d*\b|\btun\d*\b|wintun|wireguard|openvpn|nordlynx|tailscale|zerotier|hamachi|radmin|\bvpn\b|warp|amnezia|outline|hiddify|sing-?box|xray|v2ray|clash|mihomo|nekoray|nekobox|throne|\bhapp\b|proton|mullvad|windscribe|surfshark|fortinet|forticlient|anyconnect|globalprotect|pangp|softether|sstp|pritunl|cloudflare)'
+$script:VmAdapterRegex  = '(?i)(hyper-v|vethernet|vmware|virtualbox|virtual ?adapter|\bwsl\b|npcap|loopback|teredo|isatap|6to4|wan miniport|bluetooth|docker|host-only)'
+$script:KnownPublicDns  = @('1.1.1.1','1.0.0.1','8.8.8.8','8.8.4.4','9.9.9.9','149.112.112.112','77.88.8.8','77.88.8.1','208.67.222.222','208.67.220.220','94.140.14.14','94.140.15.15')
+
+function Get-AdapterKind {
+    param($Adapter)
+    $txt = "$($Adapter.Name) $($Adapter.InterfaceDescription)"
+    if ($txt -match $script:VpnAdapterRegex) { return "vpn" }
+    if ($txt -match $script:VmAdapterRegex)  { return "vm" }
+    if (-not $Adapter.HardwareInterface)     { return "virtual" }
+    return "physical"
+}
+
+function Get-NetworkDiagnostics {
+    $r = @()
+    $r += "--- Network adapter ---"
+    try {
+        $adapters = @(Get-NetAdapter -ErrorAction Stop)
+        $up = @($adapters | Where-Object { $_.Status -eq "Up" })
+        $routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue)
+        $ifMetric = @{}
+        Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $ifMetric[[int]$_.InterfaceIndex] = [int]$_.InterfaceMetric }
+
+        $ranked = @($routes | ForEach-Object {
+            $m = 0; if ($ifMetric.ContainsKey([int]$_.InterfaceIndex)) { $m = $ifMetric[[int]$_.InterfaceIndex] }
+            [pscustomobject]@{ Index = [int]$_.InterfaceIndex; Metric = ([int]$_.RouteMetric + $m); Next = $_.NextHop }
+        } | Sort-Object Metric)
+
+        if ($ranked.Count -eq 0) {
+            $r += "[X] No IPv4 default route - no internet connection through any adapter"
+        } else {
+            $primary = $adapters | Where-Object { $_.InterfaceIndex -eq $ranked[0].Index } | Select-Object -First 1
+            if ($primary) {
+                $kind = Get-AdapterKind $primary
+                $label = "$($primary.Name) ($($primary.InterfaceDescription)), $($primary.LinkSpeed), metric $($ranked[0].Metric), gateway $($ranked[0].Next)"
+                switch ($kind) {
+                    "physical" { $r += "[OK] Primary adapter: $label" }
+                    "vpn"      { $r += "[!] Primary adapter is a VPN/tunnel: $label"
+                                 $r += "    -> traffic goes through the tunnel and is NOT processed by zapret; disconnect VPN/proxy-TUN" }
+                    "vm"       { $r += "[!] Primary adapter is a virtual (VM/WSL) adapter: $label"
+                                 $r += "    -> check metrics: the real Ethernet/Wi-Fi adapter should be primary" }
+                    default    { $r += "[!] Primary adapter is not a physical NIC: $label" }
+                }
+                if ($primary.Status -ne "Up") { $r += "[X] Primary adapter status: $($primary.Status)" }
+            } else {
+                $r += "[?] Default route interface #$($ranked[0].Index) not found among adapters"
+            }
+
+            if ($ranked.Count -gt 1) {
+                $names = @($ranked | ForEach-Object {
+                    $n = (Get-NetAdapter -InterfaceIndex $_.Index -ErrorAction SilentlyContinue).Name
+                    if (-not $n) { $n = "#$($_.Index)" }
+                    "$n=$($_.Metric)"
+                })
+                $r += "[!] Several default routes (lowest metric wins): $($names -join ', ')"
+                $physUp = @($up | Where-Object { (Get-AdapterKind $_) -eq "physical" })
+                if ($physUp.Count -gt 1) {
+                    $r += "    -> two physical adapters are up (e.g. Ethernet + Wi-Fi); disable the unused one to avoid traffic flipping between them"
+                }
+            }
+
+            # IP config of primary
+            if ($primary) {
+                $ipif = Get-NetIPInterface -InterfaceIndex $primary.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                if ($ipif) {
+                    $r += "[i] IPv4 config: $(if($ipif.Dhcp -eq 'Enabled'){'DHCP'}else{'static'}), MTU $($ipif.NlMtu)"
+                    if ($ipif.NlMtu -lt 1400) { $r += "[!] Low MTU ($($ipif.NlMtu)) on primary adapter - can break large TLS/QUIC packets"; $r += "    -> typical for VPN/PPPoE leftovers; normal value is 1500 (PPPoE: 1492)" }
+                }
+            }
+        }
+
+        # other active adapters
+        $others = @($up | Where-Object { -not $primary -or $_.InterfaceIndex -ne $primary.InterfaceIndex })
+        foreach ($a in $others) {
+            $k = Get-AdapterKind $a
+            if ($k -eq "vpn") { $r += "[!] Active VPN/tunnel adapter: $($a.Name) ($($a.InterfaceDescription))" }
+            elseif ($k -eq "physical") { $r += "[i] Other active adapter: $($a.Name) ($($a.InterfaceDescription))" }
+        }
+        $disabledVpn = @($adapters | Where-Object { $_.Status -ne "Up" -and (Get-AdapterKind $_) -eq "vpn" })
+        if ($disabledVpn.Count -gt 0) {
+            $r += "[i] Inactive VPN/tunnel adapters installed: $((($disabledVpn | ForEach-Object { $_.Name }) -join ', '))"
+        }
+    } catch {
+        $r += "[?] Network adapter check failed: $($_.Exception.Message)"
+    }
+    $r += ""
+    return $r
+}
+
+function Get-DnsDiagnostics {
+    $r = @()
+    $r += "--- DNS ---"
+    try {
+        $routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue)
+        $ifMetric = @{}
+        Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $ifMetric[[int]$_.InterfaceIndex] = [int]$_.InterfaceMetric }
+        $best = $routes | ForEach-Object {
+            $m = 0; if ($ifMetric.ContainsKey([int]$_.InterfaceIndex)) { $m = $ifMetric[[int]$_.InterfaceIndex] }
+            [pscustomobject]@{ Index = [int]$_.InterfaceIndex; Metric = ([int]$_.RouteMetric + $m); Next = [string]$_.NextHop }
+        } | Sort-Object Metric | Select-Object -First 1
+
+        $targets = @()
+        if ($best) { $targets = @(Get-NetAdapter -InterfaceIndex $best.Index -ErrorAction SilentlyContinue) }
+        $targets += @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and (-not $best -or $_.InterfaceIndex -ne $best.Index) -and (Get-AdapterKind $_) -eq "physical" })
+
+        foreach ($a in $targets) {
+            if (-not $a) { continue }
+            $isPrimary = ($best -and $a.InterfaceIndex -eq $best.Index)
+            $servers = @((Get-DnsClientServerAddress -InterfaceIndex $a.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+            $reg = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($a.InterfaceGuid)" -ErrorAction SilentlyContinue
+            $static = ($reg -and $reg.NameServer)
+            $tag = if ($isPrimary) { "primary" } else { "secondary" }
+            if ($servers.Count -eq 0) {
+                $r += "[!] $($a.Name) ($tag): no IPv4 DNS servers configured"
+                continue
+            }
+            $r += "[i] $($a.Name) ($tag): $($servers -join ', ') [$(if($static){'static'}else{'DHCP'})]"
+            foreach ($s in $servers) {
+                if ($s -match '^127\.' -or $s -eq '::1') {
+                    $r += "[!] Local DNS resolver $s on $($a.Name) - a DNS proxy/filter (AdGuard, Acrylic, dnscrypt, VPN client...) is in use"
+                    $r += "    -> it can bypass or break encrypted DNS; make sure it works and does not block discord/youtube domains"
+                } elseif ($script:KnownPublicDns -contains $s) {
+                    $r += "[OK] $s is a well-known public DNS"
+                } elseif ($isPrimary -and $best -and $s -eq $best.Next) {
+                    $r += "[i] $s is the router/gateway DNS (forwards to your ISP unless changed)"
+                } elseif ($s -match '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.)') {
+                    $r += "[i] $s is a private-network DNS"
+                } else {
+                    $r += "[!] $s looks like an ISP/unknown DNS - ISP DNS can spoof blocked domains"
+                    $r += "    -> use a public DNS with DoH (1.1.1.1 / 8.8.8.8 / 9.9.9.9)"
+                }
+            }
+        }
+
+        # NRPT rules (usually from VPN / corporate clients)
+        $nrpt = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue)
+        if ($nrpt.Count -gt 0) { $r += "[!] DNS policy (NRPT) rules present: $($nrpt.Count) - set by VPN/corporate software, can redirect DNS queries" }
+
+        # Resolution sanity: names must resolve to real public addresses
+        foreach ($d in @("discord.com", "www.youtube.com", "gateway.discord.gg")) {
+            try {
+                $ans = @(Resolve-DnsName -Name $d -Type A -DnsOnly -QuickTimeout -ErrorAction Stop | Where-Object { $_.Type -eq "A" })
+                if ($ans.Count -eq 0) {
+                    $r += "[X] DNS: $d does not resolve"
+                } else {
+                    $ips = @($ans | ForEach-Object { $_.IPAddress })
+                    if (@($ips | Where-Object { $_ -match '^(0\.|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.)' }).Count -gt 0) {
+                        $r += "[X] DNS: $d resolves to a private/blackhole address ($($ips -join ', ')) - DNS spoofing or local filter"
+                    } else {
+                        $r += "[OK] DNS: $d -> $((@($ips | Select-Object -First 2)) -join ', ')"
+                    }
+                }
+            } catch {
+                $r += "[X] DNS: $d failed to resolve ($($_.Exception.Message.Split([char]10)[0]))"
+            }
+        }
+    } catch {
+        $r += "[?] DNS check failed: $($_.Exception.Message)"
+    }
+    $r += ""
+    return $r
+}
+
+function Get-Ipv6Diagnostics {
+    $r = @()
+    $r += "--- IPv6 ---"
+    try {
+        $dc = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" -Name "DisabledComponents" -ErrorAction SilentlyContinue).DisabledComponents
+        if ($null -eq $dc) { $dc = 0 }
+        if (($dc -band 0xFF) -eq 0xFF) {
+            $r += "[OK] IPv6 disabled system-wide (DisabledComponents=0x$('{0:X}' -f $dc)) - all traffic uses IPv4"
+        } else {
+            $v6 = @(Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object {
+                $_.IPAddress -notmatch '^(fe80|::1|fc|fd)' -and $_.AddressState -eq "Preferred" })
+            $v6route = @(Get-NetRoute -AddressFamily IPv6 -DestinationPrefix "::/0" -ErrorAction SilentlyContinue)
+            $bound = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled })
+            if ($v6.Count -gt 0 -and $v6route.Count -gt 0) {
+                $a = Get-NetAdapter -InterfaceIndex $v6[0].InterfaceIndex -ErrorAction SilentlyContinue
+                $r += "[!] Working global IPv6 on $($a.Name) ($($v6[0].IPAddress))"
+                $r += "    -> sites may open over IPv6 and behave differently from IPv4; if YouTube/Discord fail only sometimes, disable IPv6 on the adapter"
+                if (($dc -band 0x20) -eq 0x20) { $r += "[OK] IPv4 is preferred over IPv6 (DisabledComponents has 0x20)" }
+                else { $r += "[i] IPv4 is not forced; the simple fix is DisabledComponents=0x20 (prefer IPv4) or unticking IPv6 on the adapter" }
+            } elseif ($bound.Count -gt 0) {
+                $r += "[OK] IPv6 enabled but no global IPv6 route - traffic uses IPv4"
+            } else {
+                $r += "[OK] IPv6 is not bound to any adapter"
+            }
+        }
+        $teredo = Get-NetTeredoState -ErrorAction SilentlyContinue
+        if ($teredo -and $teredo.State -notin @("Dormant", "Offline", "Disabled")) {
+            $r += "[!] Teredo tunnel is active ($($teredo.State)) - IPv6-over-IPv4 tunnel can bypass zapret"
+        }
+    } catch {
+        $r += "[?] IPv6 check failed: $($_.Exception.Message)"
+    }
+    $r += ""
+    return $r
+}
+
+function Get-InterferenceDiagnostics {
+    param($AllServices)
+    $r = @()
+    $r += "--- VPN, proxy, bypass tools ---"
+
+    # system proxy / PAC / WinHTTP / env
+    try {
+        $is = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue
+        if ($is.ProxyEnable -eq 1) {
+            $r += "[!] System proxy enabled: $($is.ProxyServer)"
+            $r += "    -> traffic goes to the proxy, zapret only sees the connection to the proxy"
+        } else { $r += "[OK] No system proxy" }
+        if ($is.AutoConfigURL) { $r += "[!] Proxy auto-config (PAC) script set: $($is.AutoConfigURL)" }
+        $wh = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\Connections" -Name WinHttpSettings -ErrorAction SilentlyContinue).WinHttpSettings
+        if ($wh -and $wh.Length -gt 8 -and (($wh[8] -band 2) -eq 2)) { $r += "[!] WinHTTP proxy configured (used by system services/updates)" }
+        $envProxy = @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") | Where-Object { [Environment]::GetEnvironmentVariable($_) }
+        if ($envProxy) { $r += "[!] Proxy environment variables set: $($envProxy -join ', ')" }
+    } catch { $r += "[?] Proxy check failed" }
+
+    # VPN / proxy-core / bypass processes
+    try {
+        $procNames = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName.ToLower() } | Sort-Object -Unique)
+        $vpnProcs = @('v2rayn','v2ray','xray','sing-box','singbox','clash','clash-verge','verge-mihomo','mihomo','nekoray','nekobox','nekoray_core','throne','happ','hiddify','hiddify-core','amnezia','amneziavpn','amneziawg','outline','proxifier','psiphon','psiphon3','lantern','tor','openvpn','openvpn-gui','wireguard','wg','tailscale','tailscaled','zerotier-one','nordvpn','expressvpn','windscribe','protonvpn','mullvad-vpn','surfshark','cloudflarewarp','warp-svc','warp-cli','hamachi-2-ui','radmin_vpn','vpnui','forticlient','vpnagent','globalprotect')
+        $bypassProcs = @('goodbyedpi','byedpi','ciadpi','spoofdpi','powertunnel','dpitunnel','zapret','nfqws')
+        $foundV = @($vpnProcs | Where-Object { $procNames -contains $_ })
+        $foundB = @($bypassProcs | Where-Object { $procNames -contains $_ })
+        if ($foundV.Count -gt 0) { $r += "[!] VPN/proxy-core processes running: $($foundV -join ', ')"; $r += "    -> they capture traffic before zapret; close them (or exclude Discord/YouTube from their rules)" }
+        else { $r += "[OK] No VPN/proxy-core processes found" }
+        if ($foundB.Count -gt 0) { $r += "[X] Other DPI-bypass tools running: $($foundB -join ', ')" }
+
+        $ownBin = (Join-Path $ScriptPath "bin").ToLower()
+        $foreign = @(Get-CimInstance Win32_Process -Filter "Name='winws.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and -not $_.ExecutablePath.ToLower().StartsWith($ownBin) })
+        if ($foreign.Count -gt 0) { $r += "[X] winws.exe running from another folder: $($foreign[0].ExecutablePath)" }
+    } catch { $r += "[?] Process check failed" }
+
+    # WinDivert registered from a different location
+    try {
+        $wd = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\WinDivert" -ErrorAction SilentlyContinue
+        if ($wd -and $wd.ImagePath) {
+            $img = ([string]$wd.ImagePath) -replace '^\\\?\?\\', ''
+            if (-not $img.ToLower().StartsWith((Join-Path $ScriptPath "bin").ToLower())) {
+                $r += "[!] WinDivert driver is registered from another location: $img"
+                $r += "    -> left over from another zapret/GoodbyeDPI copy; remove services (Remove Services) and reinstall"
+            }
+        }
+    } catch {}
+
+    # VPN services (running vs just installed)
+    $vpnKeywords = @(
+        "vpn", "wireguard", "openvpn", "nordvpn", "expressvpn", "windscribe",
+        "mullvad", "protonvpn", "surfshark", "privateinternetaccess",
+        "ipvanish", "cyberghost", "hotspotshield", "tunnelbear", "hideme",
+        "hide\.me", "torguard", "astrill", "purevpn", "zenmate", "nekoray", "throne", "happservice",
+        "tailscale", "zerotier", "hamachi", "radmin", "amnezia", "outline", "hiddify", "psiphon",
+        "warp-svc", "cloudflarewarp", "anyconnect", "forticlient", "globalprotect", "pangps", "softether",
+        "v2ray", "xray", "sing-box", "singbox", "clash", "mihomo", "tap0901", "wintun", "lantern"
+    )
+    $runningVpn = @(); $stoppedVpn = @()
+    foreach ($svc in $AllServices) {
+        $combined = "$($svc.Name)|$($svc.DisplayName)".ToLower()
+        foreach ($kw in $vpnKeywords) {
+            if ($combined -match $kw) {
+                $label = $svc.DisplayName
+                if ($svc.Status -eq "Running") { if ($runningVpn -notcontains $label) { $runningVpn += $label } }
+                else { if ($stoppedVpn -notcontains $label) { $stoppedVpn += $label } }
+                break
+            }
+        }
+    }
+    if ($runningVpn.Count -gt 0) {
+        $r += "[!] VPN services RUNNING: $($runningVpn -join ', ')"
+        $r += "    -> disable VPN while using zapret for best results"
+    }
+    if ($stoppedVpn.Count -gt 0) { $r += "[i] VPN services installed but stopped: $($stoppedVpn -join ', ')" }
+    if ($runningVpn.Count -eq 0 -and $stoppedVpn.Count -eq 0) { $r += "[OK] No VPN services detected" }
+
+    # Hosts file overrides (non-comment lines only)
+    try {
+        $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
+        if (Test-Path $hostsFile) {
+            $active = @(Get-Content $hostsFile -ErrorAction SilentlyContinue | Where-Object { $_ -and $_ -notmatch '^\s*#' })
+            $bad = @($active | Where-Object { $_ -match '(youtube|youtu\.be|googlevideo|ytimg|ggpht|discord)' })
+            if ($bad.Count -gt 0) { $r += "[!] Hosts file overrides YouTube/Discord domains ($($bad.Count) lines) - may break or redirect them" }
+            else { $r += "[OK] Hosts file: no YouTube/Discord overrides" }
+        }
+    } catch {}
+    $r += ""
+
+    $r += "--- Security software ---"
+    $secPatterns = @(
+        @{Pattern = "kaspersky|^avp"; Name = "Kaspersky"}, @{Pattern = "ekrn|eset"; Name = "ESET"},
+        @{Pattern = "avast|aswbidsagent"; Name = "Avast"}, @{Pattern = "avgsvc|^avg"; Name = "AVG"},
+        @{Pattern = "vsserv|bitdefender"; Name = "Bitdefender"}, @{Pattern = "norton|symantec"; Name = "Norton"},
+        @{Pattern = "mfemms|mcafee"; Name = "McAfee"}, @{Pattern = "drweb|spider"; Name = "Dr.Web"},
+        @{Pattern = "cmdagent|comodo"; Name = "Comodo"}, @{Pattern = "sophos"; Name = "Sophos"},
+        @{Pattern = "f-secure|fsma"; Name = "F-Secure"}, @{Pattern = "360|qihoo"; Name = "360 Security"},
+        @{Pattern = "mbam|malwarebytes"; Name = "Malwarebytes"}, @{Pattern = "webroot|wrsvc"; Name = "Webroot"},
+        @{Pattern = "panda"; Name = "Panda"}, @{Pattern = "trend ?micro|tmbmsrv|ds_agent"; Name = "Trend Micro"}
+    )
+    $secFound = @()
+    foreach ($svc in $AllServices) {
+        if ($svc.Status -ne "Running") { continue }
+        $combined = "$($svc.Name) $($svc.DisplayName)".ToLower()
+        foreach ($p in $secPatterns) {
+            if ($combined -match $p.Pattern -and $secFound -notcontains $p.Name) { $secFound += $p.Name }
+        }
+    }
+    if ($secFound.Count -gt 0) {
+        $r += "[!] Third-party security software running: $($secFound -join ', ')"
+        $r += "    -> its web/network filtering can block WinDivert or modify traffic; add the zapret folder to exclusions"
+    } else { $r += "[OK] No third-party network-filtering security software detected" }
+
+    try {
+        $hvci = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" -ErrorAction SilentlyContinue).Enabled
+        if ($hvci -eq 1) {
+            $r += "[!] Memory integrity (HVCI) is ON - it can block the WinDivert driver from loading"
+            $r += "    -> if winws fails to start, turn off Core isolation > Memory integrity"
+        }
+    } catch {}
+    $r += ""
+    return $r
+}
+
 function Run-Diagnostics {
     Show-Progress
     Update-StatusBar "Running diagnostics..." "Info"
@@ -1407,7 +1892,8 @@ function Run-Diagnostics {
     $report += "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     $report += ""
 
-    #  Service 
+    #  Zapret itself 
+    $report += "--- Zapret ---"
     $serviceInfo = Get-ServiceInfo
     if ($serviceInfo.Installed) {
         $report += "[OK] Service installed: $($serviceInfo.Config)"
@@ -1416,12 +1902,9 @@ function Run-Diagnostics {
         $report += "[X] Service not installed"
     }
 
-    # winws.exe process
     $winwsProc = Get-Process -Name winws -ErrorAction SilentlyContinue
-    $report += "[$(if($winwsProc){'OK'}else{'X'})] winws.exe: $(if($winwsProc){"Running ($($winwsProc.Count))"}else{'Not running'})"
-    $report += ""
+    $report += "[$(if($winwsProc){'OK'}else{'X'})] winws.exe: $(if($winwsProc){'Running (' + @($winwsProc).Count + ')'}else{'Not running'})"
 
-    #  WinDivert64.sys 
     $binPath = Join-Path $ScriptPath "bin"
     if (Test-Path "$binPath\*.sys") {
         $report += "[OK] WinDivert64.sys found"
@@ -1429,7 +1912,6 @@ function Run-Diagnostics {
         $report += "[X] WinDivert64.sys NOT found"
     }
 
-    # WinDivert conflict (active without winws)
     $wdStatus = (sc.exe query WinDivert 2>&1 | Out-String)
     if ($wdStatus -match "RUNNING|STOP_PENDING") {
         if (-not $winwsProc) {
@@ -1438,9 +1920,7 @@ function Run-Diagnostics {
             $report += "[OK] WinDivert service active"
         }
     }
-    $report += ""
 
-    #  Base Filtering Engine 
     $bfe = Get-Service -Name BFE -ErrorAction SilentlyContinue
     if ($bfe -and $bfe.Status -eq "Running") {
         $report += "[OK] Base Filtering Engine running"
@@ -1448,8 +1928,7 @@ function Run-Diagnostics {
         $report += "[X] Base Filtering Engine NOT running (required for zapret)"
     }
 
-    #  TCP Timestamps 
-    # Use registry for locale-independent check (netsh output varies by Windows language)
+    # TCP timestamps (registry first: locale-independent)
     $tcpTimestampReg = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" `
         -Name "Tcp1323Opts" -ErrorAction SilentlyContinue)."Tcp1323Opts"
     $tcpTsNetsh = netsh interface tcp show global 2>&1 | Out-String
@@ -1463,19 +1942,8 @@ function Run-Diagnostics {
         netsh interface tcp set global timestamps=enabled 2>&1 | Out-Null
         $report += "    -> attempted to enable automatically"
     }
-    $report += ""
 
-    #  Proxy 
-    $proxyEnabled = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).ProxyEnable
-    if ($proxyEnabled -eq 1) {
-        $proxyServer = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction SilentlyContinue).ProxyServer
-        $report += "[!] System proxy enabled: $proxyServer"
-        $report += "    -> verify proxy is valid or disable if unused"
-    } else {
-        $report += "[OK] No system proxy"
-    }
-
-    #  DNS / DoH 
+    # Encrypted DNS
     try {
         $dohCount = (Get-ChildItem -Recurse -Path "HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\" -ErrorAction SilentlyContinue |
             Get-ItemProperty -ErrorAction SilentlyContinue |
@@ -1489,23 +1957,16 @@ function Run-Diagnostics {
     } catch {
         $report += "[?] DNS/DoH check failed"
     }
-
-    #  Hosts file: youtube entries 
-    $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
-    if (Test-Path $hostsFile) {
-        $hostsContent = Get-Content $hostsFile -ErrorAction SilentlyContinue | Out-String
-        if ($hostsContent -match "youtube\.com|youtu\.be") {
-            $report += "[!] Hosts file has youtube.com/youtu.be entries - may interfere with YouTube"
-        } else {
-            $report += "[OK] Hosts file: no YouTube overrides"
-        }
-    }
     $report += ""
 
-    #  Conflicting services & VPN 
-    # Use Get-Service (covers ALL services: running + stopped + paused)
-    $allServiceObjects = Get-Service -ErrorAction SilentlyContinue
+    #  Network / DNS / IPv6 
+    $report += Get-NetworkDiagnostics
+    $report += Get-DnsDiagnostics
+    $report += Get-Ipv6Diagnostics
 
+    #  Conflicting software 
+    $allServiceObjects = Get-Service -ErrorAction SilentlyContinue
+    $report += "--- Conflicts ---"
     $conflictChecks = @(
         @{Pattern="killer";                     Name="Killer Network"},
         @{Pattern="smartbyte";                  Name="SmartByte"},
@@ -1528,32 +1989,6 @@ function Run-Diagnostics {
         $report += "[OK] No known conflicting software"
     }
 
-    # VPN services — check BOTH service name and display name
-    $vpnKeywords = @(
-        "vpn", "wireguard", "openvpn", "nordvpn", "expressvpn", "windscribe",
-        "mullvad", "protonvpn", "surfshark", "privateinternetaccess",
-        "ipvanish", "cyberghost", "hotspotshield", "tunnelbear", "hideme",
-        "hide\.me", "torguard", "astrill", "purevpn", "zenmate", "nekoray", "throne", "happservice"
-    )
-    $foundVpn = @()
-    foreach ($svc in $allServiceObjects) {
-        $combined = "$($svc.Name)|$($svc.DisplayName)".ToLower()
-        foreach ($kw in $vpnKeywords) {
-            if ($combined -match $kw) {
-                $label = "$($svc.DisplayName) [$($svc.Status)]"
-                if ($foundVpn -notcontains $label) { $foundVpn += $label }
-                break
-            }
-        }
-    }
-    if ($foundVpn.Count -gt 0) {
-        $report += "[!] VPN services detected: $($foundVpn -join ', ')"
-        $report += "    -> disable VPN while using zapret for best results"
-    } else {
-        $report += "[OK] No VPN services detected"
-    }
-
-    # Competing bypass services
     $bypassServiceNames = @("GoodbyeDPI","discordfix_zapret","winws1","winws2")
     $foundBypass = $allServiceObjects | Where-Object { $bypassServiceNames -contains $_.Name }
     if ($foundBypass) {
@@ -1562,12 +1997,22 @@ function Run-Diagnostics {
         $report += "[OK] No competing bypass services"
     }
     $report += ""
+
+    $report += Get-InterferenceDiagnostics -AllServices $allServiceObjects
+
+    #  Summary 
+    $nErr  = @($report | Where-Object { $_ -match '^\[X\]' }).Count
+    $nWarn = @($report | Where-Object { $_ -match '^\[!\]' }).Count
+    $report += "--- Summary ---"
+    if ($nErr -eq 0 -and $nWarn -eq 0) { $report += "[OK] Nothing found that should interfere with zapret" }
+    else { $report += "$(if($nErr -gt 0){'[X]'}else{'[!]'}) Problems: $nErr, warnings: $nWarn" }
+    $report += ""
     $report += "=== END REPORT ==="
 
     #  Build window 
     $diagForm = New-Object System.Windows.Forms.Form
     $diagForm.Text = "Diagnostics Report"
-    $diagForm.Size = New-Object System.Drawing.Size(500, 560)
+    $diagForm.Size = New-Object System.Drawing.Size(720, 740)
     $diagForm.StartPosition = "CenterScreen"
     $diagForm.BackColor = $colors.Midnight
     $diagForm.FormBorderStyle = "FixedDialog"
@@ -1577,22 +2022,23 @@ function Run-Diagnostics {
     $textBox.ReadOnly = $true
     $textBox.ScrollBars = "Vertical"
     $textBox.Location = New-Object System.Drawing.Point(12, 12)
-    $textBox.Size = New-Object System.Drawing.Size(462, 448)
+    $textBox.Size = New-Object System.Drawing.Size(680, 630)
     $textBox.Font = New-Object System.Drawing.Font("Consolas", 9)
     $textBox.BackColor = $colors.DarkGray
     $textBox.ForeColor = $colors.Light
     $textBox.BorderStyle = "None"
-    $textBox.WordWrap = $true 
+    $textBox.WordWrap = $true
     $diagForm.Controls.Add($textBox)
 
-    # Colorize each line by prefix
     foreach ($line in $report) {
         $col = switch -Regex ($line) {
             "^\[OK\]"   { $colors.Success }
             "^\[X\]"    { $colors.Danger  }
             "^\[!\]"    { $colors.Warning }
             "^\[\?\]"   { $colors.Primary }
+            "^\[i\]"    { [System.Drawing.Color]::FromArgb(150, 170, 190) }
             "^\s+"      { [System.Drawing.Color]::FromArgb(120, 140, 160) }
+            "^---"      { $colors.White }
             "^==="      { [System.Drawing.Color]::FromArgb(150, 170, 190) }
             default     { $colors.Light   }
         }
@@ -1603,8 +2049,8 @@ function Run-Diagnostics {
     }
 
     $btnClearCache = New-Object System.Windows.Forms.Button
-    $btnClearCache.Location = New-Object System.Drawing.Point(12, 472)
-    $btnClearCache.Size = New-Object System.Drawing.Size(200, 36)
+    $btnClearCache.Location = New-Object System.Drawing.Point(12, 654)
+    $btnClearCache.Size = New-Object System.Drawing.Size(180, 36)
     $btnClearCache.Text = "Clear Discord Cache"
     $btnClearCache.BackColor = $colors.DarkGray
     $btnClearCache.ForeColor = $colors.Light
@@ -1614,8 +2060,22 @@ function Run-Diagnostics {
     $btnClearCache.Add_Click({ Clear-DiscordCache; $diagForm.Close() })
     $diagForm.Controls.Add($btnClearCache)
 
+    $btnCopyReport = New-Object System.Windows.Forms.Button
+    $btnCopyReport.Location = New-Object System.Drawing.Point(204, 654)
+    $btnCopyReport.Size = New-Object System.Drawing.Size(130, 36)
+    $btnCopyReport.Text = "Copy report"
+    $btnCopyReport.BackColor = $colors.DarkGray
+    $btnCopyReport.ForeColor = $colors.Light
+    $btnCopyReport.FlatStyle = "Flat"
+    $btnCopyReport.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $btnCopyReport.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnCopyReport.Add_Click({
+        try { [System.Windows.Forms.Clipboard]::SetText(($report -join "`r`n")); Update-StatusBar "Report copied to clipboard" "Success" } catch {}
+    })
+    $diagForm.Controls.Add($btnCopyReport)
+
     $closeBtn = New-Object System.Windows.Forms.Button
-    $closeBtn.Location = New-Object System.Drawing.Point(344, 472)
+    $closeBtn.Location = New-Object System.Drawing.Point(562, 654)
     $closeBtn.Size = New-Object System.Drawing.Size(130, 36)
     $closeBtn.Text = "Close"
     $closeBtn.BackColor = $colors.Primary
@@ -1628,7 +2088,7 @@ function Run-Diagnostics {
 
     Hide-Progress
     Update-StatusBar "Diagnostics complete" "Success"
-    $diagForm.ShowDialog()
+    $diagForm.ShowDialog() | Out-Null
 }
 
 function Clear-DiscordCache {
@@ -1673,6 +2133,284 @@ function Clear-DiscordCache {
     } else {
         Update-StatusBar "No Discord cache found" "Info"
     }
+}
+
+function ConvertTo-IpUInt64 {
+    param([System.Net.IPAddress]$Ip)
+    $b = $Ip.GetAddressBytes()
+    [Array]::Reverse($b)
+    return [uint64][BitConverter]::ToUInt32($b, 0)
+}
+
+function Test-IpInIpset {
+    # IPv4 membership check against lines of ipset-all.txt (CIDR or single IPs). IPv6 lines are skipped.
+    param([System.Net.IPAddress]$Ip, [string[]]$Lines)
+    $n = ConvertTo-IpUInt64 $Ip
+    $full = [uint64]4294967295
+    foreach ($l in $Lines) {
+        $l = ([string]$l).Trim()
+        if (-not $l -or $l.StartsWith("#") -or $l.Contains(":")) { continue }
+        $p = $l.Split("/")
+        $addr = $null
+        if (-not [System.Net.IPAddress]::TryParse($p[0], [ref]$addr)) { continue }
+        $bits = 32
+        if ($p.Count -gt 1) { $bits = [int]$p[1] }
+        if ($bits -le 0) { return $true }
+        $mask = ($full -shl (32 - $bits)) -band $full
+        if (($n -band $mask) -eq ((ConvertTo-IpUInt64 $addr) -band $mask)) { return $true }
+    }
+    return $false
+}
+
+function Test-PortInRanges {
+    param([int]$Port, [string]$Ranges)
+    foreach ($item in ($Ranges -split ",")) {
+        $parts = $item.Trim().Split("-")
+        if ($parts.Count -eq 1 -and $parts[0] -match '^\d+$') { if ([int]$parts[0] -eq $Port) { return $true } }
+        elseif ($parts.Count -eq 2 -and $parts[0] -match '^\d+$' -and $parts[1] -match '^\d+$') {
+            if ($Port -ge [int]$parts[0] -and $Port -le [int]$parts[1]) { return $true }
+        }
+    }
+    return $false
+}
+
+function Test-StunProbe {
+    # Sends STUN binding requests over UDP; returns how many got a valid answer and the average RTT.
+    param($Targets, [int]$Attempts = 2, [int]$TimeoutMs = 1500)
+    $ok = 0; $total = 0; $times = @()
+    $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+    foreach ($t in $Targets) {
+        for ($i = 0; $i -lt $Attempts; $i++) {
+            $total++
+            $udp = $null
+            try {
+                $tx = New-Object byte[] 12
+                $rng.GetBytes($tx)
+                $req = [byte[]](@(0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42) + $tx)
+                $udp = New-Object System.Net.Sockets.UdpClient
+                $udp.Client.ReceiveTimeout = $TimeoutMs
+                $udp.Connect($t.Ip, $t.Port)
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                [void]$udp.Send($req, $req.Length)
+                $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+                $resp = $udp.Receive([ref]$ep)
+                $sw.Stop()
+                $match = ($resp.Length -ge 20 -and $resp[0] -eq 0x01 -and $resp[1] -eq 0x01)
+                if ($match) { for ($k = 0; $k -lt 12; $k++) { if ($resp[8 + $k] -ne $tx[$k]) { $match = $false; break } } }
+                if ($match) { $ok++; $times += $sw.Elapsed.TotalMilliseconds }
+            } catch {
+            } finally {
+                if ($udp) { $udp.Close() }
+            }
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+    }
+    $rng.Dispose()
+    $avg = $null
+    if ($times.Count -gt 0) { $avg = [math]::Round((($times | Measure-Object -Average).Average), 1) }
+    return @{ Ok = $ok; Total = $total; AvgMs = $avg }
+}
+
+function Invoke-AutoFakes {
+    param($FakeType, $BinFiles)
+
+    $binPath    = Join-Path $ScriptPath "bin"
+    $activePath = Join-Path $binPath $FakeType.ActiveFile
+    $isDiscord  = ($FakeType.ActiveFile -eq "ACTIVE_DISCORD_UDP.bin")
+    $warn = [System.Windows.Forms.MessageBoxIcon]::Warning
+    $okBtn = [System.Windows.Forms.MessageBoxButtons]::OK
+
+    if (-not (Get-ServiceInfo).Installed) {
+        [System.Windows.Forms.MessageBox]::Show("Auto mode restarts the zapret service for every candidate, so the service must be installed first.", "Auto fake", $okBtn, $warn) | Out-Null
+        return
+    }
+
+    # probe servers + preconditions
+    $probeList = @()
+    if ($isDiscord) {
+        $probeList = @("stun.l.google.com:19302", "stun1.l.google.com:19302", "stun2.l.google.com:19302")
+    } else {
+        $gf = Get-GameFilterStatus
+        if ($gf.FilterUDP -eq "12") {
+            [System.Windows.Forms.MessageBox]::Show("GameFilter UDP is disabled - the game fake is not used. Enable Game Filter (TCP+UDP or UDP) first.", "Auto fake", $okBtn, $warn) | Out-Null
+            return
+        }
+        if (-not (Test-PortInRanges -Port 3478 -Ranges $gf.FilterUDP)) {
+            [System.Windows.Forms.MessageBox]::Show("Probe port 3478 is outside your GameFilter UDP range ($($gf.FilterUDP)), so the result would not reflect the game fake.", "Auto fake", $okBtn, $warn) | Out-Null
+            return
+        }
+        $probeList = @("stun.cloudflare.com:3478", "stun.stunprotocol.org:3478", "stun.nextcloud.com:3478")
+    }
+
+    $ipsetMode  = Get-IPSetStatus
+    $ipsetLines = @()
+    if (-not $isDiscord) {
+        if ($ipsetMode -eq "none") {
+            [System.Windows.Forms.MessageBox]::Show("IPSet is in NONE mode - the game fake is never applied. Switch IPSet to LOADED or ANY first.", "Auto fake", $okBtn, $warn) | Out-Null
+            return
+        }
+        if ($ipsetMode -eq "loaded") { $ipsetLines = @(Get-Content (Join-Path $ScriptPath "lists\ipset-all.txt") -ErrorAction SilentlyContinue) }
+    }
+
+    $targets = @()
+    foreach ($p in $probeList) {
+        $h, $port = $p.Split(":")
+        try {
+            $ip = [System.Net.Dns]::GetHostAddresses($h) | Where-Object { $_.AddressFamily -eq "InterNetwork" } | Select-Object -First 1
+            if (-not $ip) { continue }
+            if (-not $isDiscord -and $ipsetMode -eq "loaded" -and -not (Test-IpInIpset -Ip $ip -Lines $ipsetLines)) { continue }
+            $targets += @{ Ip = $ip; Port = [int]$port; Host = $h }
+        } catch {}
+    }
+    if ($targets.Count -eq 0) {
+        $why = if ($isDiscord) { "Could not resolve the STUN test servers (DNS/network problem)." } else { "None of the STUN test servers is covered by your ipset-all list (or DNS failed), so the game fake can't be measured here. Use manual selection." }
+        [System.Windows.Forms.MessageBox]::Show($why, "Auto fake", $okBtn, $warn) | Out-Null
+        return
+    }
+
+    $cands = @($BinFiles | Where-Object { $_.BaseName -match '^(quic_initial_|stun)' })
+    if ($cands.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No UDP fake candidates (quic_initial_*, stun*) in bin.", "Auto fake", $okBtn, $warn) | Out-Null
+        return
+    }
+
+    $confirm = [System.Windows.Forms.MessageBox]::Show(
+        "Auto will test $($cands.Count) fakes for '$($FakeType.Label)': for each one the zapret service is restarted and STUN requests are sent through the filter.`n`nThis takes a few minutes and internet may blink during restarts. The best fake is applied; if nothing beats the current one, it is kept.`n`nContinue?",
+        "Auto fake", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+    # progress window
+    $script:afCancel = $false
+    $pf = New-Object System.Windows.Forms.Form
+    $pf.Text = "Auto fake - $($FakeType.Label)"
+    $pf.ClientSize = New-Object System.Drawing.Size(480, 360)
+    $pf.StartPosition = "CenterScreen"
+    $pf.FormBorderStyle = "FixedDialog"
+    $pf.MaximizeBox = $false; $pf.MinimizeBox = $false; $pf.ControlBox = $false
+    $pf.BackColor = $colors.Midnight
+
+    $lblCur = New-Object System.Windows.Forms.Label
+    $lblCur.Location = New-Object System.Drawing.Point(15, 12)
+    $lblCur.Size = New-Object System.Drawing.Size(450, 22)
+    $lblCur.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $lblCur.ForeColor = $colors.Light
+    $pf.Controls.Add($lblCur)
+
+    $bar = New-Object System.Windows.Forms.ProgressBar
+    $bar.Location = New-Object System.Drawing.Point(15, 40)
+    $bar.Size = New-Object System.Drawing.Size(450, 20)
+    $bar.Minimum = 0; $bar.Maximum = $cands.Count + 1; $bar.Value = 0
+    $pf.Controls.Add($bar)
+
+    $logBox = New-Object System.Windows.Forms.ListBox
+    $logBox.Location = New-Object System.Drawing.Point(15, 70)
+    $logBox.Size = New-Object System.Drawing.Size(450, 235)
+    $logBox.Font = New-Object System.Drawing.Font("Consolas", 9)
+    $logBox.BackColor = $colors.DarkGray
+    $logBox.ForeColor = $colors.Light
+    $pf.Controls.Add($logBox)
+
+    $btnStop = New-Object System.Windows.Forms.Button
+    $btnStop.Location = New-Object System.Drawing.Point(350, 315)
+    $btnStop.Size = New-Object System.Drawing.Size(115, 34)
+    $btnStop.Text = "Cancel"
+    $btnStop.BackColor = $colors.Danger
+    $btnStop.ForeColor = $colors.White
+    $btnStop.FlatStyle = "Flat"
+    $btnStop.Add_Click({ $script:afCancel = $true; $btnStop.Enabled = $false; $btnStop.Text = "Stopping..." })
+    $pf.Controls.Add($btnStop)
+
+    $origCopy = Join-Path $env:TEMP "zapret_active_fake_orig.bin"
+    $hadOrig = Test-Path $activePath
+    if ($hadOrig) { Copy-Item $activePath $origCopy -Force }
+
+    $results = @()
+    $form.Enabled = $false
+    $pf.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $setFake = {
+        param($srcPath)
+        Stop-ZapretService -Silent $true | Out-Null
+        Start-Sleep -Milliseconds 300
+        if ($srcPath) {
+            if (Test-Path $activePath) { Remove-Item $activePath -Force -ErrorAction SilentlyContinue }
+            Copy-Item $srcPath $activePath -Force
+        }
+        return (Start-ZapretService -Silent $true)
+    }
+
+    try {
+        $queue = @(@{ Name = "(current)"; Path = $null }) + @($cands | ForEach-Object { @{ Name = $_.BaseName; Path = $_.FullName } })
+        foreach ($c in $queue) {
+            if ($script:afCancel) { break }
+            $lblCur.Text = "Testing: $($c.Name)"
+            [System.Windows.Forms.Application]::DoEvents()
+
+            $started = & $setFake $c.Path
+            if (-not $started) {
+                $results += [pscustomobject]@{ Name = $c.Name; Ok = 0; Total = 1; Avg = $null }
+                $logBox.Items.Add("{0,-34} service failed to start" -f $c.Name) | Out-Null
+            } else {
+                for ($w = 0; $w -lt 8; $w++) { Start-Sleep -Milliseconds 100; [System.Windows.Forms.Application]::DoEvents() }
+                $pr = Test-StunProbe -Targets $targets
+                $results += [pscustomobject]@{ Name = $c.Name; Ok = $pr.Ok; Total = $pr.Total; Avg = $pr.AvgMs }
+                $avgTxt = if ($pr.AvgMs) { "$($pr.AvgMs) ms" } else { "-" }
+                $logBox.Items.Add(("{0,-34} {1}/{2}  {3}" -f $c.Name, $pr.Ok, $pr.Total, $avgTxt)) | Out-Null
+            }
+            $logBox.TopIndex = $logBox.Items.Count - 1
+            $bar.Value = [math]::Min($bar.Maximum, $bar.Value + 1)
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+
+        # choose
+        $base  = $results | Where-Object { $_.Name -eq "(current)" } | Select-Object -First 1
+        $valid = @($results | Where-Object { $_.Name -ne "(current)" -and $_.Total -gt 0 })
+        $best  = $valid | Sort-Object @{ Expression = { $_.Ok }; Descending = $true }, @{ Expression = { if ($_.Avg) { $_.Avg } else { 99999 } } } | Select-Object -First 1
+        $choice = $null; $reason = ""
+        if ($script:afCancel) {
+            $reason = "Cancelled - original fake restored."
+        } elseif (-not $base -or -not $best) {
+            $reason = "No usable results - original fake restored."
+        } elseif ($best.Ok -gt $base.Ok) {
+            $choice = $best; $reason = "Best: $($best.Name) ($($best.Ok)/$($best.Total) answered vs $($base.Ok)/$($base.Total) for the current one)."
+        } elseif ($best.Ok -eq $base.Ok -and $best.Ok -gt 0 -and $best.Avg -and $base.Avg -and $best.Avg -lt ($base.Avg * 0.8)) {
+            $choice = $best; $reason = "Best: $($best.Name) - same reliability ($($best.Ok)/$($best.Total)) but faster ($($best.Avg) ms vs $($base.Avg) ms)."
+        } elseif ($base.Ok -eq 0) {
+            $reason = "No fake got any STUN answer - probes are probably blocked by your network/firewall, so nothing was changed."
+        } else {
+            $reason = "No candidate was clearly better than the current fake ($($base.Ok)/$($base.Total)) - kept the current one."
+        }
+
+        $lblCur.Text = "Applying result..."
+        [System.Windows.Forms.Application]::DoEvents()
+        if ($choice) {
+            $cand = $cands | Where-Object { $_.BaseName -eq $choice.Name } | Select-Object -First 1
+            & $setFake $cand.FullName | Out-Null
+            Update-StatusBar "$($FakeType.Label) fake set to $($choice.Name) (auto)" "Success"
+        } else {
+            if ($hadOrig) { Copy-Item $origCopy $activePath -Force -ErrorAction SilentlyContinue }
+            & $setFake $null | Out-Null
+            Update-StatusBar "Auto fake: $reason" "Info"
+        }
+    } catch {
+        if ($hadOrig) { Copy-Item $origCopy $activePath -Force -ErrorAction SilentlyContinue }
+        & $setFake $null | Out-Null
+        $reason = "Error: $($_.Exception.Message) - original fake restored."
+        Update-StatusBar "Auto fake failed: $($_.Exception.Message)" "Error"
+    } finally {
+        $form.Enabled = $true
+        $pf.Close(); $pf.Dispose()
+        Remove-Item $origCopy -Force -ErrorAction SilentlyContinue
+        Update-ServiceStatusBar
+        Update-StatusDisplay
+    }
+
+    $top = @($results | Where-Object { $_.Total -gt 0 } | Sort-Object @{ Expression = { $_.Ok }; Descending = $true }, @{ Expression = { if ($_.Avg) { $_.Avg } else { 99999 } } } | Select-Object -First 6 |
+        ForEach-Object { "{0,-34} {1}/{2}  {3}" -f $_.Name, $_.Ok, $_.Total, $(if ($_.Avg) { "$($_.Avg) ms" } else { "-" }) })
+    [System.Windows.Forms.MessageBox]::Show(
+        "$reason`n`nTop results (STUN answers / avg RTT):`n$($top -join "`n")`n`nNote: this measures whether UDP/STUN traffic passes and how fast with each fake. It is a proxy, not a real Discord voice or game test.",
+        "Auto fake result", $okBtn, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
 }
 
 function Replace-ActiveFakes {
@@ -1796,10 +2534,28 @@ function Replace-ActiveFakes {
     $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $rf.Controls.Add($btnCancel)
 
+    $script:rfAuto = $false
+    $btnAutoFake = New-Object System.Windows.Forms.Button
+    $btnAutoFake.Location = New-Object System.Drawing.Point(15, 395)
+    $btnAutoFake.Size = New-Object System.Drawing.Size(140, 36)
+    $btnAutoFake.Text = "Auto (best fake)"
+    $btnAutoFake.BackColor = $colors.Primary
+    $btnAutoFake.ForeColor = $colors.White
+    $btnAutoFake.FlatStyle = "Flat"
+    $btnAutoFake.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $btnAutoFake.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnAutoFake.Add_Click({ $script:rfAuto = $true; $rf.DialogResult = [System.Windows.Forms.DialogResult]::OK; $rf.Close() })
+    $rf.Controls.Add($btnAutoFake)
+
     $rf.AcceptButton = $btnApply
     $rf.CancelButton = $btnCancel
 
     if ($rf.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
+        return
+    }
+
+    if ($script:rfAuto) {
+        Invoke-AutoFakes -FakeType $fakeTypes[$cmbType.SelectedIndex] -BinFiles $binFiles
         return
     }
 
